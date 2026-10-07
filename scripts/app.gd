@@ -67,10 +67,15 @@ var modal_cancel: Button
 var url_edit: LineEdit
 var name_edit: LineEdit
 var pass_edit: LineEdit
+var email_edit: LineEdit
 var dev_name_edit: LineEdit
 var stay_check: CheckBox
 var dev_check: CheckBox
 var dev_box: VBoxContainer
+var password_gate: Control
+var current_pass_edit: LineEdit
+var new_pass_edit: LineEdit
+var password_notice: Label
 var phase_label: Label
 var health_label: Label
 var health_dot: ColorRect
@@ -155,14 +160,26 @@ func _connect_server() -> void:
 
 func _check_health() -> void:
 	var health_res := await api.request("GET", "/health")
-	var time_res := await api.request("GET", "/v1/time")
-	if time_res.get("ok", false) and time_res.get("json") is Dictionary:
-		clock.apply_sample(time_res["json"], _local_ms())
+	var health_ok := bool(health_res.get("ok", false))
+	if logged_in:
+		var time_res := await api.request("GET", "/v1/time", null, true, true)
+		var time_status := int(time_res.get("status", 0))
+		if time_status == 401:
+			await _force_logout(true)
+			return
+		if _is_password_change(time_res):
+			_show_password_gate(ApiError.verbatim(time_res.get("json"), time_status))
+			health = "ok" if health_ok else "degraded"
+			_set_health(locale.text("connected"), Color("e09a32"))
+			return
+		if time_res.get("ok", false) and time_res.get("json") is Dictionary:
+			clock.apply_sample(time_res["json"], _local_ms())
+			health = "ok"
+			_set_health(locale.text("connected"), Color("3cbf6e"))
+			return
+	if health_ok:
 		health = "ok"
 		_set_health(locale.text("connected"), Color("3cbf6e"))
-	elif health_res.get("ok", false):
-		health = "degraded"
-		_set_health(locale.text("connected"), Color("e09a32"))
 	else:
 		health = "down"
 		clock.synced = false
@@ -182,23 +199,7 @@ func _load_capabilities() -> void:
 			var probe := await api.request("POST", path, {})
 			codes[path] = int(probe.get("status", 0))
 		caps = Capabilities.from_status_codes(codes)
-	# Browsers forbid setting Origin and Access-Control-Request-* from script.
-	# On the web export, Idempotency-Key is sent only when OpenAPI names it.
-	# The server must also list that header in CORS or the browser blocks the order.
-	var allow := ""
-	if not OS.has_feature("web"):
-		var cors_headers := PackedStringArray([
-			"Origin: https://nustanakritwithai.github.io",
-			"Access-Control-Request-Method: POST",
-			"Access-Control-Request-Headers: authorization,content-type,idempotency-key",
-		])
-		var cors := await api.request("OPTIONS", "/v1/commands/move", null, false, false, cors_headers)
-		allow = ApiError.header_value(cors.get("headers", PackedStringArray()), "access-control-allow-headers")
-	caps["idempotency"] = Capabilities.should_send_idempotency(
-		bool(caps.get("idempotency_spec", false)),
-		allow != "",
-		Capabilities.cors_allows_header(allow, "Idempotency-Key")
-	)
+	caps["idempotency"] = true
 
 
 func _try_saved_session() -> void:
@@ -244,8 +245,10 @@ func _on_poll() -> void:
 	if not logged_in:
 		await _check_health()
 		return
+	if _password_blocked():
+		return
 	await _check_health()
-	if health == "down":
+	if health == "down" or not logged_in or _password_blocked():
 		return
 	await _refresh_world()
 
@@ -256,6 +259,11 @@ func _enter_game() -> void:
 	auth_layer.visible = false
 	game_layer.visible = true
 	_sync_who()
+	if bool(session.get("must_change_password", false)):
+		_show_password_gate(locale.text("password_change_required"))
+		_layout()
+		return
+	_hide_password_gate()
 	await _refresh_world()
 	_layout()
 
@@ -314,8 +322,11 @@ func _refresh_world() -> void:
 func _authed_get(path: String) -> Dictionary:
 	api.access_token = str(session.get("access_token", ""))
 	var res := await api.request("GET", path, null, true, true)
-	if int(res.get("status", 0)) == 401:
+	var status := int(res.get("status", 0))
+	if status == 401:
 		await _force_logout(true)
+	elif _is_password_change(res):
+		_show_password_gate(ApiError.verbatim(res.get("json"), status))
 	return res
 
 
@@ -363,14 +374,17 @@ func _submit_player(kind: String) -> void:
 		return
 	var path := "/v1/auth/register" if kind == "register" else "/v1/auth/login"
 	var props := Capabilities.schema_properties(openapi, path)
-	var body := Capabilities.auth_body(props, player_name, password)
+	var email := ""
+	if kind == "register" and email_edit != null:
+		email = email_edit.text.strip_edges()
+	var body := Capabilities.auth_body(props, player_name, password, email)
 	var res := await api.request("POST", path, body, false, false)
 	pass_edit.text = ""
 	await _finish_auth(res, "player")
 
 
 func _submit_dev() -> void:
-	if not settings.dev_mode:
+	if not OS.is_debug_build() or not settings.dev_mode:
 		return
 	var player_name := dev_name_edit.text.strip_edges()
 	if player_name == "":
@@ -416,6 +430,7 @@ func _force_logout(expired: bool) -> void:
 	api.access_token = ""
 	token_store.clear()
 	logged_in = false
+	_hide_password_gate()
 	_show_auth()
 	if expired:
 		phase_label.text = locale.text("session_expired")
@@ -424,12 +439,14 @@ func _force_logout(expired: bool) -> void:
 func _logout() -> void:
 	if str(session.get("mode", "")) == "player" and bool(caps.get("logout", false)):
 		api.access_token = str(session.get("access_token", ""))
-		var refresh := str(session.get("refresh_token", ""))
-		var body: Variant = null
-		if refresh != "":
-			var props := Capabilities.schema_properties(openapi, "/v1/auth/logout")
-			body = Capabilities.refresh_body(props, refresh)
-		await api.request("POST", "/v1/auth/logout", body, true, false)
+		await api.request("POST", "/v1/auth/logout", null, true, false)
+	await _force_logout(false)
+
+
+func _logout_all() -> void:
+	if str(session.get("mode", "")) == "player" and bool(caps.get("logout_all", false)):
+		api.access_token = str(session.get("access_token", ""))
+		await api.request("POST", "/v1/auth/logout-all", null, true, true)
 	await _force_logout(false)
 
 
@@ -438,11 +455,11 @@ func _dispatch(order: Dictionary) -> void:
 		return
 	command_inflight = true
 	status_banner.text = locale.text("working")
-	var headers := PackedStringArray()
-	if bool(caps.get("idempotency", false)):
-		headers.append("Idempotency-Key: %s" % JsonText.uuid4())
-	api.access_token = str(session.get("access_token", ""))
-	var res := await api.request("POST", str(order["path"]), order["body"], true, true, headers)
+	var key := CommandBodies.idempotency_key(str(order.get("idempotency_key", "")), true)
+	order["idempotency_key"] = key
+	var res := await _post_command(order, key)
+	if _retryable_command(res):
+		res = await _post_command(order, key)
 	command_inflight = false
 	status_banner.text = ""
 	var status := int(res.get("status", 0))
@@ -453,6 +470,9 @@ func _dispatch(order: Dictionary) -> void:
 		return
 	if status == 401:
 		await _force_logout(true)
+		return
+	if _is_password_change(res):
+		_show_password_gate(ApiError.verbatim(res.get("json"), status))
 		return
 	if not bool(res.get("ok", false)):
 		var message := locale.text("error_network") if status == 0 else ApiError.verbatim(
@@ -465,6 +485,31 @@ func _dispatch(order: Dictionary) -> void:
 	_sync_target_banner()
 	_alert(locale.text("server_accepted"), JsonText.pretty(JsonText.redact(res.get("json"))))
 	await _refresh_world()
+
+
+func _post_command(order: Dictionary, key: String) -> Dictionary:
+	api.access_token = str(session.get("access_token", ""))
+	var headers := PackedStringArray(["Idempotency-Key: %s" % key])
+	return await api.request("POST", str(order["path"]), order["body"], true, true, headers)
+
+
+func _retryable_command(res: Dictionary) -> bool:
+	var status := int(res.get("status", 0))
+	return status == 0 or status >= 500
+
+
+func _is_password_change(res: Dictionary) -> bool:
+	if int(res.get("status", 0)) != 403:
+		return false
+	var payload = res.get("json")
+	if not (payload is Dictionary):
+		return false
+	var err = (payload as Dictionary).get("error", {})
+	return err is Dictionary and str((err as Dictionary).get("code", "")) == "password_change_required"
+
+
+func _password_blocked() -> bool:
+	return password_gate != null and password_gate.visible
 
 
 func _note_missing_path(path: String) -> void:
@@ -604,7 +649,11 @@ func _queue(body: Dictionary, path: String) -> void:
 	_sync_target_banner()
 	_layout()
 	_render_side()
-	_open_confirm(_order_summary(path, body), {"path": path, "body": body})
+	_open_confirm(_order_summary(path, body), {
+		"path": path,
+		"body": body,
+		"idempotency_key": JsonText.uuid4(),
+	})
 
 
 func _refresh_selected_city() -> void:
@@ -787,6 +836,7 @@ func _build_ui() -> void:
 	status_banner = Label.new()
 	status_banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	game_layer.add_child(status_banner)
+	_build_password_gate()
 
 	modal = ColorRect.new()
 	modal.color = Color(0, 0, 0, 0.62)
@@ -829,6 +879,112 @@ func _build_ui() -> void:
 	modal_ok.custom_minimum_size = Vector2(160, 48)
 	modal_ok.pressed.connect(_on_modal_ok)
 	dialog_buttons.add_child(modal_ok)
+
+
+func _build_password_gate() -> void:
+	password_gate = Control.new()
+	password_gate.visible = false
+	password_gate.set_anchors_preset(Control.PRESET_FULL_RECT)
+	password_gate.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(password_gate)
+	var dim := ColorRect.new()
+	dim.color = Color("12171f")
+	dim.set_anchors_preset(Control.PRESET_FULL_RECT)
+	dim.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	password_gate.add_child(dim)
+	var box := VBoxContainer.new()
+	box.set_anchors_preset(Control.PRESET_CENTER)
+	box.offset_left = -260
+	box.offset_right = 260
+	box.offset_top = -220
+	box.offset_bottom = 220
+	box.add_theme_constant_override("separation", 8)
+	password_gate.add_child(box)
+	var title := Label.new()
+	title.set_meta("i18n", "change_password")
+	title.add_theme_font_size_override("font_size", 24)
+	box.add_child(title)
+	password_notice = Label.new()
+	password_notice.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	box.add_child(password_notice)
+	_add_caption(box, "current_password")
+	current_pass_edit = LineEdit.new()
+	current_pass_edit.secret = true
+	current_pass_edit.custom_minimum_size = Vector2(0, 44)
+	box.add_child(current_pass_edit)
+	_add_caption(box, "new_password")
+	new_pass_edit = LineEdit.new()
+	new_pass_edit.secret = true
+	new_pass_edit.custom_minimum_size = Vector2(0, 44)
+	box.add_child(new_pass_edit)
+	var change_btn := Button.new()
+	change_btn.set_meta("i18n", "change_password")
+	change_btn.custom_minimum_size = Vector2(0, 48)
+	change_btn.pressed.connect(_submit_change_password)
+	box.add_child(change_btn)
+	var logout_btn := Button.new()
+	logout_btn.set_meta("i18n", "logout")
+	logout_btn.custom_minimum_size = Vector2(0, 48)
+	logout_btn.pressed.connect(_logout)
+	box.add_child(logout_btn)
+	var all_btn := Button.new()
+	all_btn.set_meta("i18n", "logout_all")
+	all_btn.custom_minimum_size = Vector2(0, 48)
+	all_btn.pressed.connect(_logout_all)
+	box.add_child(all_btn)
+
+
+func _show_password_gate(message: String) -> void:
+	if password_gate == null:
+		return
+	password_gate.visible = true
+	password_notice.text = message if message != "" else locale.text("password_change_required")
+	_apply_static_text()
+
+
+func _hide_password_gate() -> void:
+	if password_gate != null:
+		password_gate.visible = false
+	if current_pass_edit != null:
+		current_pass_edit.text = ""
+	if new_pass_edit != null:
+		new_pass_edit.text = ""
+
+
+func _submit_change_password() -> void:
+	var current := current_pass_edit.text
+	var new_password := new_pass_edit.text
+	current_pass_edit.text = ""
+	new_pass_edit.text = ""
+	if current == "" or new_password == "":
+		_alert(locale.text("alert_title"), locale.text("name_required"))
+		return
+	api.access_token = str(session.get("access_token", ""))
+	var res := await api.request(
+		"POST",
+		"/v1/auth/change-password",
+		Capabilities.change_password_body(current, new_password),
+		true,
+		true
+	)
+	var status := int(res.get("status", 0))
+	if status == 401:
+		await _force_logout(true)
+		return
+	var interpreted := AuthLogic.interpret_auth_http(status, res.get("json"))
+	if not bool(interpreted.get("ok", false)):
+		var message := locale.text("error_network") if status == 0 else str(interpreted.get("message", ""))
+		_alert(locale.text("server_rejected"), message)
+		return
+	var payload: Dictionary = interpreted["payload"]
+	session = AuthLogic.apply_token_payload(session, payload, "player")
+	api.access_token = str(session.get("access_token", ""))
+	if AuthLogic.should_persist_refresh(settings.stay_signed_in, "player", payload):
+		token_store.save_refresh(str(session.get("refresh_token", "")))
+	else:
+		token_store.clear()
+	_hide_password_gate()
+	await _refresh_world()
 
 
 func _build_auth_form() -> void:
@@ -884,6 +1040,10 @@ func _build_auth_form() -> void:
 	pass_edit.secret = true
 	pass_edit.custom_minimum_size = Vector2(0, 44)
 	auth_box.add_child(pass_edit)
+	_add_caption(auth_box, "email")
+	email_edit = LineEdit.new()
+	email_edit.custom_minimum_size = Vector2(0, 44)
+	auth_box.add_child(email_edit)
 	stay_check = CheckBox.new()
 	stay_check.set_meta("i18n", "stay_signed_in")
 	stay_check.button_pressed = settings.stay_signed_in
@@ -911,10 +1071,11 @@ func _build_auth_form() -> void:
 	dev_check.set_meta("i18n", "dev_mode")
 	dev_check.button_pressed = settings.dev_mode
 	dev_check.toggled.connect(_on_dev_toggled)
+	dev_check.visible = OS.is_debug_build()
 	auth_box.add_child(dev_check)
 	dev_box = VBoxContainer.new()
 	dev_box.add_theme_constant_override("separation", 8)
-	dev_box.visible = settings.dev_mode
+	dev_box.visible = OS.is_debug_build() and settings.dev_mode
 	auth_box.add_child(dev_box)
 	var dev_help := Label.new()
 	dev_help.set_meta("i18n", "dev_mode_help")
@@ -1008,18 +1169,18 @@ func _render_city() -> void:
 		_add_plain(side, locale.text("no_city"))
 		return
 	_add_plain(side, "%s  (%s, %s)  %s" % [
-		city.get("name", ""),
-		city.get("x", ""),
-		city.get("y", ""),
-		city.get("player_name", ""),
+		Present.field(city, "name"),
+		Present.field(city, "x"),
+		Present.field(city, "y"),
+		Present.field(city, "player_name"),
 	])
 	_add_plain(side, locale.text("city_hint"))
 	_add_section(side, "resources")
 	for key in ["wood", "food", "iron", "gold"]:
 		_add_plain(side, "%s  %s    %s %s" % [
 			locale.text(key),
-			city.get(key, ""),
-			city.get("%s_rate" % key, ""),
+			Present.field(city, key),
+			Present.field(city, "%s_rate" % key),
 			locale.text("per_hour"),
 		])
 	if city.has("last_updated"):
@@ -1029,7 +1190,7 @@ func _render_city() -> void:
 	var shown := {}
 	for building in BUILDINGS:
 		shown[building] = true
-		var level = buildings.get(building, "—")
+		var level := Present.field(buildings, building)
 		var row := HBoxContainer.new()
 		side.add_child(row)
 		var label := Label.new()
@@ -1040,14 +1201,14 @@ func _render_city() -> void:
 	for building in buildings:
 		if shown.has(building):
 			continue
-		_add_plain(side, "%s  %s %s" % [building, locale.text("level"), buildings[building]])
+		_add_plain(side, "%s  %s %s" % [building, locale.text("level"), Present.field(buildings, str(building))])
 	_add_section(side, "research")
 	var research: Dictionary = me.get("research", {}) if me.get("research") is Dictionary else {}
 	for tech in TECHS:
 		var row := HBoxContainer.new()
 		side.add_child(row)
 		var label := Label.new()
-		label.text = "%s  %s %s" % [tech, locale.text("level"), research.get(tech, "—")]
+		label.text = "%s  %s %s" % [tech, locale.text("level"), Present.field(research, tech)]
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(label)
 		_add_small_button(row, "research_action", _send_research.bind(tech))
@@ -1124,7 +1285,7 @@ func _render_army() -> void:
 	var army := _find(armies, selected_army_id)
 	if army.is_empty():
 		return
-	_add_plain(side, "%s  %s" % [locale.text("status"), army.get("status", "")])
+	_add_plain(side, "%s  %s" % [locale.text("status"), Present.field(army, "status")])
 	_add_plain(side, "%s  %s    %s  %s" % [
 		locale.text("home"),
 		army.get("home_city_id", ""),
@@ -1166,16 +1327,16 @@ func _render_reports() -> void:
 		)
 		var detail: Dictionary = report_detail
 		_add_plain(side, "#%s" % detail.get("id", ""))
-		_add_plain(side, "%s  %s" % [locale.text("winner"), detail.get("winner", "")])
+		_add_plain(side, "%s  %s" % [locale.text("winner"), Present.field(detail, "winner")])
 		_add_plain(side, "%s  %s    %s  %s" % [
 			locale.text("attacker"),
 			detail.get("attacker_player_id", ""),
 			locale.text("defender"),
 			detail.get("defender_player_id", ""),
 		])
-		_add_plain(side, "%s  %s" % [locale.text("seed"), detail.get("seed", "")])
-		_add_plain(side, "%s  %s" % [locale.text("rounds"), detail.get("rounds", "")])
-		_add_plain(side, "%s  %s" % [locale.text("created_at"), detail.get("created_at", "")])
+		_add_plain(side, "%s  %s" % [locale.text("seed"), Present.field(detail, "seed")])
+		_add_plain(side, "%s  %s" % [locale.text("rounds"), Present.text(detail.get("rounds"))])
+		_add_plain(side, "%s  %s" % [locale.text("created_at"), Present.field(detail, "created_at")])
 		_add_section(side, "casualties")
 		_add_plain(side, "attacker  %s" % JsonText.pretty(detail.get("attacker_casualties")))
 		_add_plain(side, "defender  %s" % JsonText.pretty(detail.get("defender_casualties")))
@@ -1189,7 +1350,7 @@ func _render_reports() -> void:
 		return
 	for report in reports:
 		if report is Dictionary:
-			var label := "#%s  %s %s" % [report.get("id", ""), locale.text("winner"), report.get("winner", "")]
+			var label := "#%s  %s %s" % [Present.field(report, "id"), locale.text("winner"), Present.field(report, "winner")]
 			_add_picker(side, label, _open_report.bind(int(report.get("id", 0))))
 
 
@@ -1213,6 +1374,10 @@ func _render_settings() -> void:
 	use.pressed.connect(_apply_settings_url.bind(editor))
 	side.add_child(use)
 	_add_idempotency_note(side)
+	if bool(caps.get("change_password", false)):
+		_add_action_button(side, "change_password", _show_password_gate.bind(locale.text("change_password")))
+	if bool(caps.get("logout_all", false)):
+		_add_action_button(side, "logout_all", _logout_all)
 	_add_section(side, "unavailable_actions")
 	var any := false
 	for key in ["train", "found_city", "garrison", "transfer"]:

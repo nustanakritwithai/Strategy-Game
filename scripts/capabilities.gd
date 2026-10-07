@@ -10,6 +10,9 @@ const ROUTES := {
 	"login": "/v1/auth/login",
 	"refresh": "/v1/auth/refresh",
 	"logout": "/v1/auth/logout",
+	"logout_all": "/v1/auth/logout-all",
+	"change_password": "/v1/auth/change-password",
+	"auth_me": "/v1/auth/me",
 	"dev_login": "/v1/auth/dev-login",
 	"move": "/v1/commands/move",
 	"attack": "/v1/commands/attack",
@@ -123,23 +126,28 @@ static func resolve_schema(spec: Dictionary, schema: Dictionary) -> Dictionary:
 	return schema
 
 
-static func auth_body(properties: PackedStringArray, player_name: String, password: String) -> Dictionary:
+static func auth_body(
+	properties: PackedStringArray,
+	username: String,
+	password: String,
+	email: String = ""
+) -> Dictionary:
 	var body := {}
-	var wrote_identity := false
-	if properties.is_empty():
-		return {"name": player_name, "password": password}
-	for key in properties:
-		if key in ["name", "username", "player_name", "display_name"]:
-			body[key] = player_name
-			wrote_identity = true
-		elif key == "email":
-			body[key] = player_name
-			wrote_identity = true
-		elif key == "password":
-			body[key] = password
-	if body.is_empty() or not wrote_identity or not body.has("password"):
-		return {"name": player_name, "password": password}
+	var keys := properties
+	if keys.is_empty() or keys.has("username"):
+		body["username"] = username
+	elif keys.has("name"):
+		body["name"] = username
+	if keys.is_empty() or keys.has("password"):
+		body["password"] = password
+	var mail := email.strip_edges()
+	if mail != "" and (keys.is_empty() or keys.has("email")):
+		body["email"] = mail
 	return body
+
+
+static func change_password_body(current_password: String, new_password: String) -> Dictionary:
+	return {"current_password": current_password, "new_password": new_password}
 
 
 static func refresh_body(properties: PackedStringArray, refresh_token: String) -> Dictionary:

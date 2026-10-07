@@ -21,10 +21,24 @@ static func position(origin: Vector2, dest: Vector2, amount: float) -> Vector2:
 	)
 
 
-static func _xy(node: Variant) -> Vector2:
-	if node is Dictionary:
-		return Vector2(float(node.get("x", 0.0)), float(node.get("y", 0.0)))
-	return Vector2.ZERO
+static func known_position(army: Dictionary, now_ms: int) -> bool:
+	return _known(army, now_ms)
+
+
+static func _point(node: Variant) -> Variant:
+	if node is Dictionary and (node as Dictionary).has("x") and (node as Dictionary).has("y"):
+		return Vector2(float((node as Dictionary)["x"]), float((node as Dictionary)["y"]))
+	return null
+
+
+static func _known(army: Dictionary, now_ms: int) -> bool:
+	var movement = army.get("movement")
+	if movement is Dictionary:
+		var depart := IsoTime.parse_unix_ms(str(movement.get("depart_at", "")))
+		var arrive := IsoTime.parse_unix_ms(str(movement.get("arrive_at", "")))
+		if (depart != 0 or arrive != 0) and _point(movement.get("origin")) != null and _point(movement.get("destination")) != null:
+			return true
+	return _point(army.get("position")) != null
 
 
 static func army_position(army: Dictionary, now_ms: int) -> Vector2:
@@ -32,11 +46,11 @@ static func army_position(army: Dictionary, now_ms: int) -> Vector2:
 	if movement is Dictionary:
 		var depart := IsoTime.parse_unix_ms(str(movement.get("depart_at", "")))
 		var arrive := IsoTime.parse_unix_ms(str(movement.get("arrive_at", "")))
-		if depart != 0 or arrive != 0:
-			var origin := _xy(movement.get("origin", {}))
-			var dest := _xy(movement.get("destination", {}))
+		var origin = _point(movement.get("origin"))
+		var dest = _point(movement.get("destination"))
+		if (depart != 0 or arrive != 0) and origin is Vector2 and dest is Vector2:
 			return position(origin, dest, progress(depart, arrive, now_ms))
-	var pos = army.get("position")
-	if pos is Dictionary and (pos.has("x") or pos.has("y")):
-		return _xy(pos)
+	var pos = _point(army.get("position"))
+	if pos is Vector2:
+		return pos
 	return Vector2.ZERO

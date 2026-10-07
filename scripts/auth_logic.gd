@@ -25,16 +25,11 @@ static func interpret_auth_http(status: int, payload: Variant) -> Dictionary:
 
 
 static func should_persist_refresh(stay_signed_in: bool, mode: String, payload: Dictionary) -> bool:
-	if mode != "player":
+	# Remember-me is the only reason a refresh token touches disk.
+	# Access tokens are never persisted. Dev-login tokens are never persisted.
+	if not stay_signed_in or mode != "player":
 		return false
-	if str(payload.get("refresh_token", "")) == "":
-		return false
-	var hint := str(payload.get("token_storage", payload.get("refresh_storage", ""))).to_lower()
-	if hint == "memory" or hint == "none" or hint == "session":
-		return false
-	if hint == "persistent" or hint == "device":
-		return true
-	return stay_signed_in
+	return str(payload.get("refresh_token", "")) != ""
 
 
 static func apply_token_payload(session: Dictionary, payload: Dictionary, mode: String) -> Dictionary:
@@ -56,8 +51,14 @@ static func apply_token_payload(session: Dictionary, payload: Dictionary, mode: 
 			next["player_id"] = int(player["id"])
 		if player.has("name"):
 			next["player_name"] = str(player["name"])
+	if payload.has("username"):
+		next["username"] = str(payload["username"])
 	if payload.has("expires_in"):
 		next["expires_in"] = int(payload["expires_in"])
+	if payload.has("refresh_expires_in"):
+		next["refresh_expires_in"] = int(payload["refresh_expires_in"])
+	if payload.has("must_change_password"):
+		next["must_change_password"] = bool(payload["must_change_password"])
 	return next
 
 
@@ -68,5 +69,8 @@ static func blank_session() -> Dictionary:
 		"mode": "",
 		"player_id": 0,
 		"player_name": "",
+		"username": "",
 		"expires_in": 0,
+		"refresh_expires_in": 0,
+		"must_change_password": false,
 	}

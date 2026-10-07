@@ -109,6 +109,33 @@ func _movement_display_position() -> String:
 	var idle_point := MovementInterp.army_position(idle, 0)
 	if idle_point != Vector2(3, 4):
 		return "idle point %s" % idle_point
+	var incomplete := {
+		"movement": {
+			"depart_at": "1970-01-01T00:00:00Z",
+			"arrive_at": "1970-01-01T00:00:10Z",
+			"origin": {},
+			"destination": {"x": 1},
+		},
+		"position": {"x": 8, "y": 9},
+	}
+	if MovementInterp.army_position(incomplete, 5000) != Vector2(8, 9):
+		return "incomplete march invented a point"
+	var nowhere := {
+		"movement": {
+			"depart_at": "1970-01-01T00:00:00Z",
+			"arrive_at": "1970-01-01T00:00:10Z",
+			"origin": {},
+			"destination": {"x": 1},
+		},
+	}
+	if MovementInterp.known_position(nowhere, 5000):
+		return "unknown position treated as known"
+	if Present.field({}, "wood") != "UNKNOWN":
+		return "missing field"
+	if Present.field({"wood": 0}, "wood") != "0":
+		return "zero hidden"
+	if Present.text(null) != "UNKNOWN":
+		return "null"
 	return ""
 
 
@@ -212,15 +239,21 @@ func _idempotency_policy() -> String:
 
 
 func _auth_body_schema() -> String:
-	var body := Capabilities.auth_body(PackedStringArray(["username", "password"]), "Ada", "secret")
-	if body.get("username") != "Ada" or body.get("password") != "secret" or body.has("name"):
+	var body := Capabilities.auth_body(PackedStringArray(["username", "password", "email"]), "Ada", "secret", "")
+	if body.get("username") != "Ada" or body.get("password") != "secret" or body.has("email") or body.has("name"):
 		return str(body.keys())
+	var with_email := Capabilities.auth_body(PackedStringArray(["username", "password", "email"]), "Ada", "secret", "ada@example.com")
+	if with_email.get("email") != "ada@example.com":
+		return "email"
 	var fallback := Capabilities.auth_body(PackedStringArray(), "Ada", "secret")
-	if fallback.get("name") != "Ada" or fallback.get("password") != "secret":
+	if fallback.get("username") != "Ada" or fallback.get("password") != "secret":
 		return "fallback"
 	var refresh := Capabilities.refresh_body(PackedStringArray(), "r1")
 	if refresh.get("refresh_token") != "r1":
 		return "refresh body"
+	var changed := Capabilities.change_password_body("old-secret", "new-secret")
+	if changed.get("current_password") != "old-secret" or changed.get("new_password") != "new-secret":
+		return "change password"
 	return ""
 
 
@@ -243,15 +276,9 @@ func _auth_persist_policy() -> String:
 		return "dev token would be stored"
 	var player := {"access_token": "a", "refresh_token": "r"}
 	if not AuthLogic.should_persist_refresh(true, "player", player):
-		return "stay signed in ignored"
+		return "remember me ignored"
 	if AuthLogic.should_persist_refresh(false, "player", player):
-		return "unchecked stay still stored"
-	var memory := {"access_token": "a", "refresh_token": "r", "token_storage": "memory"}
-	if AuthLogic.should_persist_refresh(true, "player", memory):
-		return "memory hint ignored"
-	var persistent := {"access_token": "a", "refresh_token": "r", "token_storage": "persistent"}
-	if not AuthLogic.should_persist_refresh(false, "player", persistent):
-		return "persistent hint ignored"
+		return "unchecked remember me still stored"
 	if AuthLogic.should_persist_refresh(true, "player", {"access_token": "a"}):
 		return "missing refresh stored"
 	return ""
@@ -297,6 +324,13 @@ func _command_bodies() -> String:
 	var transfer := CommandBodies.transfer_body(1, 2, 3, 0, 0, 1)
 	if transfer.get("wood") != 3 or transfer.get("gold") != 1 or transfer.get("destination_city_id") != 2:
 		return "transfer"
+	var first := CommandBodies.idempotency_key("", false)
+	var reused := CommandBodies.idempotency_key(first, true)
+	if reused != first:
+		return "retry minted a new key"
+	var fresh := CommandBodies.idempotency_key(first, false)
+	if fresh == first or fresh == "":
+		return "new action reused the key"
 	return ""
 
 
@@ -359,6 +393,9 @@ func _settings_store_roundtrip() -> String:
 		return "url %s" % loaded.server_url
 	if loaded.locale != "en" or not loaded.dev_mode or loaded.stay_signed_in:
 		return "flags"
+	var fresh := SettingsStore.new()
+	if fresh.stay_signed_in:
+		return "remember me defaults on"
 	var text := FileAccess.get_file_as_string(ProjectSettings.globalize_path(path))
 	if text.contains("password") or text.contains("token"):
 		return "settings file holds a secret"

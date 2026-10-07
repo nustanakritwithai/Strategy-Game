@@ -7,7 +7,7 @@ const DEFAULT_PATH := "user://settings.cfg"
 var server_url := DEFAULT_URL
 var locale := "th"
 var dev_mode := false
-var stay_signed_in := true
+var stay_signed_in := false
 
 
 func load(path: String = DEFAULT_PATH) -> void:
@@ -19,7 +19,7 @@ func load(path: String = DEFAULT_PATH) -> void:
 	if locale != "en":
 		locale = "th"
 	dev_mode = bool(cfg.get_value("ui", "dev_mode", false))
-	stay_signed_in = bool(cfg.get_value("ui", "stay_signed_in", true))
+	stay_signed_in = bool(cfg.get_value("ui", "stay_signed_in", false))
 
 
 func save(path: String = DEFAULT_PATH) -> void:

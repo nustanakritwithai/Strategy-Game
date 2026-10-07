@@ -169,9 +169,9 @@ func _closest_city(screen_pos: Vector2) -> int:
 	var best_id := 0
 	var best := HIT_RADIUS
 	for city in cities:
-		if not (city is Dictionary):
+		if not (city is Dictionary) or not city.has("x") or not city.has("y"):
 			continue
-		var point := _world_to_screen(Vector2(float(city.get("x", 0.0)), float(city.get("y", 0.0))))
+		var point := _world_to_screen(Vector2(float(city["x"]), float(city["y"])))
 		var distance := point.distance_to(screen_pos)
 		if distance < best:
 			best = distance
@@ -184,6 +184,8 @@ func _closest_army(screen_pos: Vector2) -> int:
 	var best := HIT_RADIUS
 	for army in armies:
 		if not (army is Dictionary):
+			continue
+		if not MovementInterp.known_position(army, now_ms):
 			continue
 		var point := _world_to_screen(MovementInterp.army_position(army, now_ms))
 		var distance := point.distance_to(screen_pos)
@@ -214,25 +216,28 @@ func _draw() -> void:
 		if not (army is Dictionary):
 			continue
 		var movement = army.get("movement")
-		if movement is Dictionary:
-			var dest: Dictionary = movement.get("destination", {})
-			var here := MovementInterp.army_position(army, now_ms)
-			var there := Vector2(float(dest.get("x", here.x)), float(dest.get("y", here.y)))
-			draw_line(_world_to_screen(here), _world_to_screen(there), Color("8ecae6a0"), 2.0)
+		if movement is Dictionary and MovementInterp.known_position(army, now_ms):
+			var dest = movement.get("destination")
+			if dest is Dictionary and dest.has("x") and dest.has("y"):
+				var here := MovementInterp.army_position(army, now_ms)
+				var there := Vector2(float(dest["x"]), float(dest["y"]))
+				draw_line(_world_to_screen(here), _world_to_screen(there), Color("8ecae6a0"), 2.0)
 	for city in cities:
-		if not (city is Dictionary):
+		if not (city is Dictionary) or not city.has("x") or not city.has("y"):
 			continue
-		var point := _world_to_screen(Vector2(float(city.get("x", 0.0)), float(city.get("y", 0.0))))
+		var point := _world_to_screen(Vector2(float(city["x"]), float(city["y"])))
 		var mine := bool(city.get("is_mine", int(city.get("player_id", -1)) == my_player_id))
 		var color := Color("f0c14a") if mine else Color("e07a5f")
 		draw_circle(point, 11.0, color)
 		if int(city.get("id", 0)) == selected_city_id:
 			draw_arc(point, 16.0, 0, TAU, 24, Color("f7f7f2"), 2.0)
 		if font != null:
-			var label := str(city.get("name", city.get("id", "")))
+			var label := Present.field(city, "name")
 			draw_string(font, point + Vector2(14, 4), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("f2f4f8"))
 	for army in armies:
 		if not (army is Dictionary):
+			continue
+		if not MovementInterp.known_position(army, now_ms):
 			continue
 		var point := _world_to_screen(MovementInterp.army_position(army, now_ms))
 		var selected := int(army.get("id", 0)) == selected_army_id
@@ -245,7 +250,7 @@ func _draw() -> void:
 			Color("f7f7f2") if selected else Color("8ecae6")
 		)
 		if font != null:
-			draw_string(font, point + Vector2(12, -6), str(army.get("name", "")), HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("d7eef7"))
+			draw_string(font, point + Vector2(12, -6), Present.field(army, "name"), HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("d7eef7"))
 	if font != null and legend_own != "":
 		draw_circle(Vector2(18, 18), 6, Color("f0c14a"))
 		draw_string(font, Vector2(30, 24), legend_own, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("f2f4f8"))

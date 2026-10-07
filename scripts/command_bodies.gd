@@ -5,6 +5,13 @@ class_name CommandBodies
 ## The server validates them and decides the outcome.
 
 
+static func idempotency_key(existing: String, retrying: bool) -> String:
+	var key := existing.strip_edges()
+	if retrying and key != "":
+		return key
+	return JsonText.uuid4()
+
+
 static func move_body(army_id: int, destination_city_id: int, relocate: bool) -> Dictionary:
 	return {
 		"army_id": army_id,
