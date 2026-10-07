@@ -25,6 +25,7 @@ func cases() -> Array:
 		["token_store_refresh_only", _token_store_refresh_only],
 		["settings_store_roundtrip", _settings_store_roundtrip],
 		["exact_server_integers", _exact_server_integers],
+		["maintenance_banner", _maintenance_banner],
 	]
 
 
@@ -423,4 +424,17 @@ func _exact_server_integers() -> String:
 		return "string mutated"
 	if abs(float(row["ratio"]) - 1.5) > 0.001:
 		return "float mutated"
+	return ""
+
+
+func _maintenance_banner() -> String:
+	if not ApiError.is_maintenance(503, {"error": {"code": "maintenance", "message": "world is in maintenance; player commands are not accepted"}}):
+		return "503 missed"
+	if not ApiError.is_maintenance(409, {"error": {"code": "maintenance", "message": "worker is paused for snapshot restore"}}):
+		return "409 maintenance missed"
+	if ApiError.is_maintenance(404, {"error": {"code": "not_found", "message": "missing"}}):
+		return "404 treated as maintenance"
+	var text := ApiError.verbatim({"error": {"code": "maintenance", "message": "world is in maintenance; player commands are not accepted"}}, 503)
+	if not text.contains("world is in maintenance") or not text.contains("code: maintenance"):
+		return text
 	return ""

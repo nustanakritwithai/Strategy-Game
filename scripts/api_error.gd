@@ -5,6 +5,16 @@ class_name ApiError
 ## GameError messages and FastAPI validation msgs are kept as the server sent them.
 
 
+static func is_maintenance(status: int, payload: Variant) -> bool:
+	if status == 503:
+		return true
+	if payload is Dictionary:
+		var err = (payload as Dictionary).get("error")
+		if err is Dictionary and str((err as Dictionary).get("code", "")) == "maintenance":
+			return true
+	return false
+
+
 static func verbatim(payload: Variant, status: int = 0) -> String:
 	if payload is Dictionary:
 		var err = payload.get("error")

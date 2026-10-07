@@ -18,7 +18,8 @@
 8. เมือง: ทรัพยากร อาคาร งานวิจัย กองประจำการ ตามค่าล่าสุดจากเซิร์ฟเวอร์ สั่งก่อสร้าง วิจัย ฝึกหน่วย สร้างเมือง โอนทรัพยากรได้ ข้อความที่เซิร์ฟเวอร์ปฏิเสธแสดงตามที่ส่งมา
 9. ทัพ: เสริมกำลัง ย้ายถิ่นฐาน โจมตี เรียกกลับ ประจำการ เลือกเป้าหมายบนแผนที่ หรือจากรายชื่อเมืองด้านข้างเมื่อจุดทับกัน แล้วยืนยัน ทุกคำสั่งแนบ `Idempotency-Key` ค่าใหม่ และการส่งซ้ำคำสั่งเดิมใช้คีย์เดิม
 10. รายงานการรบมาจาก `GET /v1/me/reports` และ `GET /v1/me/reports/{id}`
-11. สลับภาษาไทย/อังกฤษได้จากหน้าเข้าสู่ระบบหรือแถบบน ภาษาเริ่มต้นคือไทย ฟอนต์ Noto Sans Thai (SIL Open Font License, ดู `fonts/OFL.txt`)
+11. เส้นทางที่ไคลเอนต์ใช้ และช่องที่เซิร์ฟเวอร์ยังไม่มี อยู่ใน `docs/SERVER_COVERAGE.md`
+12. สลับภาษาไทย/อังกฤษได้จากหน้าเข้าสู่ระบบหรือแถบบน ภาษาเริ่มต้นคือไทย ฟอนต์ Noto Sans Thai (SIL Open Font License, ดู `fonts/OFL.txt`)
 
 ไม่มีตัวติดตามหรือ analytics
 
@@ -89,7 +90,8 @@ Default server: `https://157-85-96-139.sslip.io`
 8. The city panel shows resources, buildings, research, and the garrison from the latest server payload. Build, research, train, found city, and transfer send the server's own errors back verbatim.
 9. Army orders are reinforce, relocate, attack, recall, and garrison. Pick the target on the map, or from the city list shown beside the map when markers overlap, then confirm. Every command POST sends a new `Idempotency-Key`. A retry of that same order reuses the key.
 10. Battle reports come from `GET /v1/me/reports` and `GET /v1/me/reports/{id}`.
-11. Switch Thai and English from the sign-in screen or the top bar. Thai is the default. The font is Noto Sans Thai (SIL Open Font License, see `fonts/OFL.txt`).
+11. Which player routes the client calls, and which server gaps remain, is listed in `docs/SERVER_COVERAGE.md`.
+12. Switch Thai and English from the sign-in screen or the top bar. Thai is the default. The font is Noto Sans Thai (SIL Open Font License, see `fonts/OFL.txt`).
 
 No analytics and no trackers.
 

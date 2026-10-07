@@ -29,6 +29,10 @@ var side_dirty := false
 var fitted_once := false
 
 var me := {}
+var account := {}
+var server_meta := {}
+var jobs: Array = []
+var maintenance_message := ""
 var cities: Array = []
 var map_cities: Array = []
 var armies: Array = []
@@ -81,7 +85,10 @@ var health_label: Label
 var health_dot: ColorRect
 var who_label: Label
 var clock_label: Label
+var maintenance_banner: Label
 var poll_timer: Timer
+var deadline_refreshing := false
+var seen_deadlines := {}
 
 
 func _ready() -> void:
@@ -159,7 +166,11 @@ func _connect_server() -> void:
 
 
 func _check_health() -> void:
+	var root_res := await api.request("GET", "/")
+	if root_res.get("ok", false) and root_res.get("json") is Dictionary:
+		server_meta = root_res["json"]
 	var health_res := await api.request("GET", "/health")
+	_note_maintenance(health_res)
 	var health_ok := bool(health_res.get("ok", false))
 	if logged_in:
 		var time_res := await api.request("GET", "/v1/time", null, true, true)
@@ -309,6 +320,13 @@ func _refresh_world() -> void:
 		return
 	if report_res.get("ok", false) and report_res.get("json") is Dictionary:
 		reports = report_res["json"].get("reports", [])
+	var account_res := await _authed_get("/v1/auth/me")
+	if not logged_in:
+		return
+	if account_res.get("ok", false) and account_res.get("json") is Dictionary:
+		account = account_res["json"]
+		if bool(account.get("must_change_password", false)):
+			_show_password_gate(locale.text("password_change_required"))
 	if selected_city_id != 0:
 		var detail := await _authed_get("/v1/me/cities/%s" % selected_city_id)
 		if detail.get("ok", false) and detail.get("json") is Dictionary:
@@ -322,6 +340,7 @@ func _refresh_world() -> void:
 func _authed_get(path: String) -> Dictionary:
 	api.access_token = str(session.get("access_token", ""))
 	var res := await api.request("GET", path, null, true, true)
+	_note_maintenance(res)
 	var status := int(res.get("status", 0))
 	if status == 401:
 		await _force_logout(true)
@@ -462,6 +481,7 @@ func _dispatch(order: Dictionary) -> void:
 		res = await _post_command(order, key)
 	command_inflight = false
 	status_banner.text = ""
+	_note_maintenance(res)
 	var status := int(res.get("status", 0))
 	if status == 404:
 		_note_missing_path(str(order["path"]))
@@ -483,6 +503,8 @@ func _dispatch(order: Dictionary) -> void:
 		return
 	target_mode = ""
 	_sync_target_banner()
+	if res.get("json") is Dictionary:
+		_remember_job(res["json"])
 	_alert(locale.text("server_accepted"), JsonText.pretty(JsonText.redact(res.get("json"))))
 	await _refresh_world()
 
@@ -495,6 +517,8 @@ func _post_command(order: Dictionary, key: String) -> Dictionary:
 
 func _retryable_command(res: Dictionary) -> bool:
 	var status := int(res.get("status", 0))
+	if ApiError.is_maintenance(status, res.get("json")):
+		return false
 	return status == 0 or status >= 500
 
 
@@ -510,6 +534,28 @@ func _is_password_change(res: Dictionary) -> bool:
 
 func _password_blocked() -> bool:
 	return password_gate != null and password_gate.visible
+
+
+func _note_maintenance(res: Dictionary) -> void:
+	var status := int(res.get("status", 0))
+	if ApiError.is_maintenance(status, res.get("json")):
+		maintenance_message = ApiError.verbatim(res.get("json"), status)
+	elif bool(res.get("ok", false)):
+		maintenance_message = ""
+	_sync_maintenance_banner()
+
+
+func _sync_maintenance_banner() -> void:
+	if maintenance_banner == null:
+		return
+	maintenance_banner.visible = maintenance_message != ""
+	maintenance_banner.text = "%s\n%s" % [locale.text("maintenance"), maintenance_message]
+
+
+func _remember_job(payload: Dictionary) -> void:
+	if not payload.has("due_at"):
+		return
+	jobs.append(payload.duplicate(true))
 
 
 func _note_missing_path(path: String) -> void:
@@ -836,6 +882,11 @@ func _build_ui() -> void:
 	status_banner = Label.new()
 	status_banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	game_layer.add_child(status_banner)
+	maintenance_banner = Label.new()
+	maintenance_banner.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+	maintenance_banner.visible = false
+	maintenance_banner.add_theme_color_override("font_color", Color("e09a32"))
+	game_layer.add_child(maintenance_banner)
 	_build_password_gate()
 
 	modal = ColorRect.new()
@@ -1183,8 +1234,9 @@ func _render_city() -> void:
 			Present.field(city, "%s_rate" % key),
 			locale.text("per_hour"),
 		])
-	if city.has("last_updated"):
-		_add_plain(side, "%s  %s" % [locale.text("last_updated"), city.get("last_updated", "")])
+	_add_plain(side, "%s  %s" % [locale.text("last_updated"), Present.field(city, "last_updated")])
+	_add_plain(side, "%s  %s" % [locale.text("upkeep"), locale.text("upkeep_missing")])
+	_render_jobs(side)
 	_add_section(side, "buildings")
 	var buildings: Dictionary = city.get("buildings", {}) if city.get("buildings") is Dictionary else {}
 	var shown := {}
@@ -1214,7 +1266,13 @@ func _render_city() -> void:
 		_add_small_button(row, "research_action", _send_research.bind(tech))
 	_add_section(side, "garrison")
 	var garrison = city.get("garrison_army_ids", [])
-	_add_plain(side, "%s  %s" % [locale.text("garrison_ids"), garrison])
+	if garrison is Array and not (garrison as Array).is_empty():
+		for army_id in garrison:
+			var army := _find(armies, int(army_id))
+			var army_name := Present.field(army, "name") if not army.is_empty() else Present.text(army_id)
+			_add_plain(side, "%s  %s" % [army_name, Present.text(army_id)])
+	else:
+		_add_plain(side, Present.text(garrison))
 	_add_section(side, "train")
 	_add_disabled_or_form(side, "train", "/v1/commands/train", _train_form)
 	_add_section(side, "found_city")
@@ -1267,10 +1325,14 @@ func _transfer_form(parent: Node) -> void:
 		var spin := _spin(0, 1000000000, int(transfer_amounts[key]))
 		spin.value_changed.connect(_on_transfer_amount.bind(key))
 		parent.add_child(spin)
-	var dest := _find(map_cities, transfer_dest_id)
-	var dest_name := str(dest.get("name", transfer_dest_id)) if transfer_dest_id != 0 else locale.text("none")
+	var dest := _find(cities, transfer_dest_id)
+	var dest_name := Present.field(dest, "name") if not dest.is_empty() else locale.text("none")
 	_add_plain(parent, "%s  %s" % [locale.text("dest_city"), dest_name])
-	_add_action_button(parent, "tap_city", _begin_target.bind("transfer"))
+	_add_section(parent, "own_cities")
+	for city in cities:
+		if city is Dictionary and int(city.get("id", 0)) != selected_city_id:
+			var label := "%s  (%s, %s)" % [Present.field(city, "name"), Present.field(city, "x"), Present.field(city, "y")]
+			_add_picker(parent, label, _pick_transfer_dest.bind(int(city.get("id", 0))))
 	_add_action_button(parent, "transfer", _send_transfer)
 
 
@@ -1288,14 +1350,19 @@ func _render_army() -> void:
 	_add_plain(side, "%s  %s" % [locale.text("status"), Present.field(army, "status")])
 	_add_plain(side, "%s  %s    %s  %s" % [
 		locale.text("home"),
-		army.get("home_city_id", ""),
+		_city_label(army.get("home_city_id")),
 		locale.text("location"),
-		army.get("location_city_id", ""),
+		_city_label(army.get("location_city_id")),
 	])
-	_add_plain(side, "%s  %s" % [locale.text("units"), army.get("units", "")])
+	_add_section(side, "units")
+	_add_plain(side, _units_text(army.get("units")))
+	var position = army.get("position")
+	if position is Dictionary:
+		_add_plain(side, "(%s, %s)" % [Present.field(position, "x"), Present.field(position, "y")])
 	var movement = army.get("movement")
 	if movement is Dictionary:
-		_add_plain(side, "%s  %s" % [locale.text("mission"), movement.get("mission", "")])
+		_add_plain(side, "%s  %s" % [locale.text("mission"), Present.field(movement, "mission")])
+		_add_plain(side, "%s  %s" % [locale.text("status"), Present.field(movement, "status")])
 		var eta := Label.new()
 		eta.set_meta("arrive", str(movement.get("arrive_at", "")))
 		eta.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
@@ -1337,6 +1404,27 @@ func _render_reports() -> void:
 		_add_plain(side, "%s  %s" % [locale.text("seed"), Present.field(detail, "seed")])
 		_add_plain(side, "%s  %s" % [locale.text("rounds"), Present.text(detail.get("rounds"))])
 		_add_plain(side, "%s  %s" % [locale.text("created_at"), Present.field(detail, "created_at")])
+		_add_plain(side, "%s  %s    %s  %s" % [
+			locale.text("trace"),
+			Present.field(detail, "trace_id"),
+			"event",
+			Present.field(detail, "event_id"),
+		])
+		_add_plain(side, "%s  %s    %s  %s" % [
+			"movement",
+			Present.field(detail, "movement_id"),
+			locale.text("army"),
+			Present.field(detail, "attacker_army_id"),
+		])
+		_add_plain(side, "%s  %s" % [locale.text("city"), _city_label(detail.get("defender_city_id"))])
+		_add_section(side, "before")
+		_add_plain(side, "attacker  %s" % _units_text(detail.get("attacker_before")))
+		_add_plain(side, "defender  %s" % _units_text(detail.get("defender_before")))
+		_add_section(side, "remaining")
+		_add_plain(side, "attacker  %s" % _units_text(detail.get("attacker_remaining")))
+		_add_plain(side, "defender  %s" % _units_text(detail.get("defender_remaining")))
+		_add_section(side, "defender_resources")
+		_add_plain(side, JsonText.pretty(detail.get("defender_resources")))
 		_add_section(side, "casualties")
 		_add_plain(side, "attacker  %s" % JsonText.pretty(detail.get("attacker_casualties")))
 		_add_plain(side, "defender  %s" % JsonText.pretty(detail.get("defender_casualties")))
@@ -1363,6 +1451,21 @@ func _apply_settings_url(editor: LineEdit) -> void:
 
 func _render_settings() -> void:
 	_add_section(side, "settings")
+	_add_section(side, "account")
+	_add_plain(side, "%s  %s" % [locale.text("player_name"), Present.field(account, "username")])
+	_add_plain(side, "%s  %s" % [locale.text("email"), Present.field(account, "email")])
+	_add_plain(side, "%s  %s" % [locale.text("player"), Present.field(account, "player_name")])
+	_add_plain(side, "%s  %s    %s  %s" % [
+		locale.text("locked"),
+		Present.field(account, "locked"),
+		locale.text("has_password"),
+		Present.field(account, "has_password"),
+	])
+	_add_plain(side, "%s  %s %s" % [
+		locale.text("server_version"),
+		Present.field(server_meta, "name"),
+		Present.field(server_meta, "version"),
+	])
 	_add_caption(side, "server_url")
 	var editor := LineEdit.new()
 	editor.text = settings.server_url
@@ -1548,6 +1651,9 @@ func _layout() -> void:
 	target_banner.size = Vector2(max(0.0, map_view.size.x - 24), 64)
 	status_banner.position = Vector2(12, size.y - tab_h - 36)
 	status_banner.size = Vector2(max(0.0, size.x - 24), 32)
+	if maintenance_banner != null:
+		maintenance_banner.position = Vector2(12, body_top + 4)
+		maintenance_banner.size = Vector2(max(0.0, size.x - 24), 48)
 	if modal != null and modal.get_child_count() > 0:
 		var dialog := modal.get_child(0) as Control
 		var dialog_w: float = min(560.0, max(280.0, size.x - 24.0))
@@ -1577,12 +1683,96 @@ func _refresh_eta(now_ms: int) -> void:
 
 func _walk_eta(node: Node, now_ms: int) -> void:
 	if node.has_meta("arrive"):
-		var remain := IsoTime.parse_unix_ms(str(node.get_meta("arrive"))) - now_ms
+		var stamp := str(node.get_meta("arrive"))
+		var remain := IsoTime.parse_unix_ms(stamp) - now_ms
 		var label := node as Label
 		if label != null:
 			label.text = "%s  %s" % [locale.text("eta"), _format_remain(remain)]
+		_watch_deadline(stamp, remain)
 	for child in node.get_children():
 		_walk_eta(child, now_ms)
+
+
+func _render_jobs(parent: Node) -> void:
+	_add_section(parent, "queue")
+	_add_plain(parent, locale.text("queue_hint"))
+	if jobs.is_empty():
+		_add_plain(parent, locale.text("none"))
+		return
+	for job in jobs:
+		if job is Dictionary:
+			_add_plain(parent, "%s  %s  %s" % [
+				Present.field(job, "type"),
+				Present.field(job, "status"),
+				Present.field(job, "event_id"),
+			])
+			var eta := Label.new()
+			eta.set_meta("arrive", str(job.get("due_at", "")))
+			eta.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+			parent.add_child(eta)
+			_add_plain(parent, "%s  %s" % [locale.text("due"), Present.field(job, "due_at")])
+
+
+func _pick_transfer_dest(city_id: int) -> void:
+	transfer_dest_id = city_id
+	_render_side()
+
+
+func _city_label(city_id: Variant) -> String:
+	if city_id == null or str(city_id) == "":
+		return Present.UNKNOWN
+	var found := _find(cities, int(city_id))
+	if found.is_empty():
+		found = _find(map_cities, int(city_id))
+	if found.is_empty():
+		return Present.text(city_id)
+	return "%s (%s)" % [Present.field(found, "name"), Present.text(city_id)]
+
+
+func _units_text(value: Variant) -> String:
+	if value == null:
+		return Present.UNKNOWN
+	if value is Array:
+		if (value as Array).is_empty():
+			return locale.text("none")
+		var lines := PackedStringArray()
+		for item in value:
+			if item is Dictionary:
+				lines.append("%s  %s" % [Present.field(item, "type"), Present.field(item, "count")])
+			else:
+				lines.append(Present.text(item))
+		return "\n".join(lines)
+	if value is Dictionary:
+		return JsonText.pretty(value)
+	return Present.text(value)
+
+
+func _watch_deadline(stamp: String, remain_ms: int) -> void:
+	if stamp == "":
+		return
+	if remain_ms > 0:
+		seen_deadlines.erase(stamp)
+		return
+	if seen_deadlines.has(stamp) or deadline_refreshing or not logged_in:
+		return
+	seen_deadlines[stamp] = true
+	deadline_refreshing = true
+	_refresh_after_deadline()
+
+
+func _refresh_after_deadline() -> void:
+	await _refresh_world()
+	var now := clock.now_unix_ms(_local_ms()) if clock.synced else 0
+	var kept: Array = []
+	for job in jobs:
+		if job is Dictionary:
+			var due := IsoTime.parse_unix_ms(str(job.get("due_at", "")))
+			if due > now:
+				kept.append(job)
+	jobs = kept
+	deadline_refreshing = false
+	if not _side_editing():
+		_render_side()
 
 
 func _format_remain(remain_ms: int) -> String:
