@@ -1,0 +1,79 @@
+name: Web
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: web-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends unzip curl ca-certificates libfontconfig1 libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1
+      - name: Cache Godot
+        uses: actions/cache@v4
+        with:
+          path: .godot-sdk
+          key: godot-4.7.2-stable-linux-x86_64
+      - name: Install Godot
+        run: bash tools/install_godot.sh
+      - name: Import project
+        run: .godot-sdk/bin/godot --headless --editor --quit --path .
+      - name: Unit tests
+        run: .godot-sdk/bin/godot --headless --path . --script res://tests/run_tests.gd
+
+  web:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: System libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends unzip curl ca-certificates libfontconfig1 libx11-6 libxcursor1 libxinerama1 libxrandr2 libxi6 libgl1
+      - name: Cache Godot
+        uses: actions/cache@v4
+        with:
+          path: .godot-sdk
+          key: godot-4.7.2-stable-linux-x86_64
+      - name: Install Godot
+        run: bash tools/install_godot.sh
+      - name: Export web
+        run: |
+          .godot-sdk/bin/godot --headless --editor --quit --path .
+          mkdir -p build/web
+          .godot-sdk/bin/godot --headless --path . --export-release "Web" build/web/index.html
+          python3 tools/check_web_export.py build/web/index.html
+      - name: Upload web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-export
+          path: build/web
+          if-no-files-found: error
+      - name: Upload Pages artifact
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web
+
+  deploy:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: web
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

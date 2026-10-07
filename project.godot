@@ -1,0 +1,25 @@
+; Engine configuration file.
+; Godot 4.7 — single-threaded web export, GL Compatibility.
+
+config_version=5
+
+[application]
+
+config/name="Strategy Game"
+config/description="Player client for the strategy server. The server decides every outcome."
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+config/icon="res://icon.svg"
+
+[display]
+
+window/size/viewport_width=1280
+window/size/viewport_height=720
+window/stretch/mode="canvas_items"
+window/stretch/aspect="expand"
+window/handheld/orientation=4
+
+[rendering]
+
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
