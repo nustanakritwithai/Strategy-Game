@@ -56,6 +56,70 @@ static func pretty(value: Variant, indent: int = 0) -> String:
 	return str(value)
 
 
+## Godot parses every JSON number as a float, so a 64-bit seed would be rounded.
+## Integers with 16 or more digits are quoted before parsing and stay exact text.
+static func parse_preserving_integers(text: String) -> Variant:
+	if text == "":
+		return null
+	return JSON.parse_string(_quote_wide_integers(text))
+
+
+static func _quote_wide_integers(text: String) -> String:
+	var out := ""
+	var i := 0
+	var in_string := false
+	var escape := false
+	while i < text.length():
+		var ch := text.substr(i, 1)
+		if in_string:
+			out += ch
+			if escape:
+				escape = false
+			elif ch == "\\":
+				escape = true
+			elif ch == "\"":
+				in_string = false
+			i += 1
+			continue
+		if ch == "\"":
+			in_string = true
+			out += ch
+			i += 1
+			continue
+		if ch == "-" or (ch >= "0" and ch <= "9"):
+			var start := i
+			if ch == "-":
+				i += 1
+			var digits := 0
+			while i < text.length():
+				var digit := text.substr(i, 1)
+				if digit < "0" or digit > "9":
+					break
+				digits += 1
+				i += 1
+			if i < text.length():
+				var mark := text.substr(i, 1)
+				if mark == "." or mark == "e" or mark == "E":
+					i += 1
+					while i < text.length():
+						var more := text.substr(i, 1)
+						if (more >= "0" and more <= "9") or more == "+" or more == "-" or more == "e" or more == "E" or more == ".":
+							i += 1
+							continue
+						break
+					out += text.substr(start, i - start)
+					continue
+			var raw := text.substr(start, i - start)
+			if digits >= 16:
+				out += "\"%s\"" % raw
+			else:
+				out += raw
+			continue
+		out += ch
+		i += 1
+	return out
+
+
 static func uuid4() -> String:
 	var rng := RandomNumberGenerator.new()
 	rng.randomize()

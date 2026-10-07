@@ -80,7 +80,7 @@ func _send(
 	var resp_body: PackedByteArray = args[3]
 	http.queue_free()
 	var text := resp_body.get_string_from_utf8()
-	var parsed: Variant = JSON.parse_string(text) if text != "" else null
+	var parsed: Variant = JsonText.parse_preserving_integers(text)
 	if status >= 400 or result != HTTPRequest.RESULT_SUCCESS:
 		push_warning("HTTP %s %s -> status %s result %s" % [method, path, status, result])
 	return {

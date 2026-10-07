@@ -21,4 +21,6 @@ static func text(value: Variant) -> String:
 		return UNKNOWN
 	if value is String and (value as String) == "":
 		return UNKNOWN
+	if value is float and is_finite(value) and value == floor(value) and abs(value) <= 9007199254740992.0:
+		return str(int(value))
 	return str(value)

@@ -24,6 +24,7 @@ func cases() -> Array:
 		["uuid4_shape", _uuid4_shape],
 		["token_store_refresh_only", _token_store_refresh_only],
 		["settings_store_roundtrip", _settings_store_roundtrip],
+		["exact_server_integers", _exact_server_integers],
 	]
 
 
@@ -136,6 +137,8 @@ func _movement_display_position() -> String:
 		return "zero hidden"
 	if Present.text(null) != "UNKNOWN":
 		return "null"
+	if Present.text(5.0) != "5":
+		return "whole float shown with a fraction"
 	return ""
 
 
@@ -400,4 +403,24 @@ func _settings_store_roundtrip() -> String:
 	if text.contains("password") or text.contains("token"):
 		return "settings file holds a secret"
 	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	return ""
+
+
+func _exact_server_integers() -> String:
+	var parsed: Variant = JsonText.parse_preserving_integers(
+		'{"seed":8752478362702228813,"id":5,"name":"seed 8752478362702228813","ratio":1.5}'
+	)
+	if not (parsed is Dictionary):
+		return "parse failed"
+	var row: Dictionary = parsed
+	if str(row["seed"]) != "8752478362702228813":
+		return "seed rounded to %s" % str(row["seed"])
+	if Present.field(row, "seed") != "8752478362702228813":
+		return "seed label"
+	if int(row["id"]) != 5:
+		return "small id"
+	if str(row["name"]) != "seed 8752478362702228813":
+		return "string mutated"
+	if abs(float(row["ratio"]) - 1.5) > 0.001:
+		return "float mutated"
 	return ""
