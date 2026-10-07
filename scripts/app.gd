@@ -1324,10 +1324,10 @@ func _layout() -> void:
 	auth_scroll.size = Vector2(panel_w, max(0.0, size.y - 16))
 	var narrow := size.x < 900.0
 	var top_h := 56.0
-	var tab_h := 56.0 if narrow else 0.0
+	var tab_h := 56.0
 	game_top.position = Vector2(8, 6)
 	game_top.size = Vector2(max(0.0, size.x - 16), top_h - 8)
-	tab_bar.visible = narrow
+	tab_bar.visible = true
 	tab_bar.position = Vector2(4, size.y - tab_h)
 	tab_bar.size = Vector2(max(0.0, size.x - 8), tab_h)
 	var body_top := top_h
