@@ -599,10 +599,14 @@ func _on_modal_cancel() -> void:
 	modal_cancel.visible = true
 
 
-func _order_summary(path: String, body: Dictionary) -> String:
-	return "%s\nPOST %s\n%s\n\n%s" % [
+func _order_summary(path: String, body: Dictionary, key: String = "") -> String:
+	var key_line := ""
+	if key != "":
+		key_line = "Idempotency-Key: %s\n" % key
+	return "%s\nPOST %s\n%s%s\n\n%s" % [
 		locale.text("confirm_title"),
 		path,
+		key_line,
 		JsonText.pretty(body),
 		locale.text("command_blurb"),
 	]
@@ -695,10 +699,11 @@ func _queue(body: Dictionary, path: String) -> void:
 	_sync_target_banner()
 	_layout()
 	_render_side()
-	_open_confirm(_order_summary(path, body), {
+	var key := JsonText.uuid4()
+	_open_confirm(_order_summary(path, body, key), {
 		"path": path,
 		"body": body,
-		"idempotency_key": JsonText.uuid4(),
+		"idempotency_key": key,
 	})
 
 
