@@ -13,6 +13,7 @@ const ROUTES := {
 	"logout_all": "/v1/auth/logout-all",
 	"change_password": "/v1/auth/change-password",
 	"auth_me": "/v1/auth/me",
+	"claim_start": "/v1/auth/claim-start",
 	"dev_login": "/v1/auth/dev-login",
 	"move": "/v1/commands/move",
 	"attack": "/v1/commands/attack",

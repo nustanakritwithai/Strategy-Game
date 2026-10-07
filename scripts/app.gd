@@ -7,6 +7,9 @@ const BUILDINGS := ["lumber_camp", "farm", "iron_mine", "warehouse", "barracks"]
 const TECHS := ["forestry", "husbandry", "metallurgy", "logistics"]
 const UNITS := ["militia", "infantry", "archer", "cavalry"]
 const POLL_SECONDS := 8.0
+## Narrowest layout width in UI units. A phone in portrait (~390 CSS px) lays out
+## at its own width instead of a shrunken desktop canvas.
+const MIN_UI_WIDTH := 360.0
 
 var locale := Locale.new()
 var settings := SettingsStore.new()
@@ -50,6 +53,11 @@ var found_y := 0
 var transfer_dest_id := 0
 var transfer_amounts := {"wood": 0, "food": 0, "iron": 0, "gold": 0}
 var pending_order := {}
+var start_info := StartLogic.parse(null)
+var start_claimed := false
+var start_applied := false
+var start_error := ""
+var home_center_pending := true
 
 var font: Font
 var auth_layer: Control
@@ -57,6 +65,8 @@ var game_layer: Control
 var auth_scroll: ScrollContainer
 var auth_box: VBoxContainer
 var game_top: HBoxContainer
+var resource_bar: ResourceBar
+var top_logout_btn: Button
 var map_view: MapView
 var side_scroll: ScrollContainer
 var side: VBoxContainer
@@ -97,6 +107,8 @@ func _ready() -> void:
 	offset_top = 0
 	offset_right = 0
 	offset_bottom = 0
+	_fit_content_scale()
+	get_window().size_changed.connect(_fit_content_scale)
 	font = load("res://fonts/NotoSansThai-Regular.ttf")
 	theme = _make_theme(font)
 	settings.load()
@@ -131,6 +143,22 @@ func _process(_delta: float) -> void:
 func _notification(what: int) -> void:
 	if what == NOTIFICATION_RESIZED:
 		_layout()
+
+
+## One UI unit per CSS pixel: divide the window by the screen scale (the browser's
+## devicePixelRatio on the web). Below MIN_UI_WIDTH the UI is scaled down to fit.
+func _fit_content_scale() -> void:
+	var window := get_window()
+	if window == null:
+		return
+	var pixels := Vector2(window.size)
+	if pixels.x < 1.0 or pixels.y < 1.0:
+		return
+	var dpr: float = max(1.0, DisplayServer.screen_get_scale())
+	var logical := pixels / dpr
+	if logical.x < MIN_UI_WIDTH:
+		logical *= MIN_UI_WIDTH / logical.x
+	window.content_scale_size = Vector2i(int(round(logical.x)), int(round(logical.y)))
 
 
 func _local_ms() -> int:
@@ -275,8 +303,70 @@ func _enter_game() -> void:
 		_layout()
 		return
 	_hide_password_gate()
+	await _ensure_start()
+	if not logged_in:
+		return
 	await _refresh_world()
 	_layout()
+
+
+## Read GET /v1/auth/me. If the server says start_granted is false, call
+## POST /v1/auth/claim-start once for this session. The server picks the tile;
+## the request carries no body and no coordinates.
+func _ensure_start() -> void:
+	var res := await _authed_get("/v1/auth/me")
+	if not logged_in:
+		return
+	if res.get("ok", false) and res.get("json") is Dictionary:
+		account = res["json"]
+		start_info = StartLogic.parse(account)
+	if bool(account.get("must_change_password", false)) or _password_blocked():
+		return
+	if StartLogic.needs_claim(start_info) and not start_claimed:
+		if not bool(caps.get("claim_start", false)):
+			start_error = locale.text("waiting_endpoint", {"endpoint": StartLogic.CLAIM_PATH})
+		else:
+			start_claimed = true
+			api.access_token = str(session.get("access_token", ""))
+			var claim := await api.request("POST", StartLogic.CLAIM_PATH, StartLogic.claim_body(), true, true)
+			_note_maintenance(claim)
+			var status := int(claim.get("status", 0))
+			if status == 401:
+				await _force_logout(true)
+				return
+			if _is_password_change(claim):
+				_show_password_gate(ApiError.verbatim(claim.get("json"), status))
+				return
+			if claim.get("ok", false) and claim.get("json") is Dictionary:
+				start_info = StartLogic.parse(claim["json"])
+				start_error = ""
+			else:
+				start_error = locale.text("error_network") if status == 0 else ApiError.verbatim(claim.get("json"), status)
+				_alert(locale.text("server_rejected"), start_error)
+	_apply_start_selection()
+
+
+## Once per session: select the server's home city and army, and center the map there.
+func _apply_start_selection() -> void:
+	if start_applied or not StartLogic.granted(start_info):
+		return
+	start_applied = true
+	var city_id := StartLogic.home_city_id(start_info)
+	if city_id != 0:
+		selected_city_id = city_id
+	var army_id := StartLogic.army_id(start_info)
+	if army_id != 0:
+		selected_army_id = army_id
+	home_center_pending = StartLogic.home_point(start_info) != null
+
+
+func _reset_start() -> void:
+	start_info = StartLogic.parse(null)
+	start_claimed = false
+	start_applied = false
+	start_error = ""
+	home_center_pending = true
+	fitted_once = false
 
 
 func _show_auth() -> void:
@@ -325,12 +415,16 @@ func _refresh_world() -> void:
 		return
 	if account_res.get("ok", false) and account_res.get("json") is Dictionary:
 		account = account_res["json"]
+		var fresh_start := StartLogic.parse(account)
+		if bool(fresh_start.get("known", false)):
+			start_info = fresh_start
 		if bool(account.get("must_change_password", false)):
 			_show_password_gate(locale.text("password_change_required"))
 	if selected_city_id != 0:
 		var detail := await _authed_get("/v1/me/cities/%s" % selected_city_id)
 		if detail.get("ok", false) and detail.get("json") is Dictionary:
 			city_detail = detail["json"]
+	_apply_start_selection()
 	_ensure_selection()
 	_sync_who()
 	_sync_map()
@@ -351,9 +445,9 @@ func _authed_get(path: String) -> Dictionary:
 
 func _ensure_selection() -> void:
 	if _find(cities, selected_city_id).is_empty() and not cities.is_empty():
-		selected_city_id = int((cities[0] as Dictionary).get("id", 0))
+		selected_city_id = Present.id_of((cities[0] as Dictionary).get("id"))
 	if _find(armies, selected_army_id).is_empty() and not armies.is_empty():
-		selected_army_id = int((armies[0] as Dictionary).get("id", 0))
+		selected_army_id = Present.id_of((armies[0] as Dictionary).get("id"))
 
 
 func _sync_who() -> void:
@@ -375,11 +469,36 @@ func _sync_map() -> void:
 	map_view.legend_own = locale.text("own_city")
 	map_view.legend_other = locale.text("other_city")
 	map_view.legend_army = locale.text("army_marker")
-	if not fitted_once and not map_cities.is_empty() and map_view.size.x > 20:
+	var home = StartLogic.home_point(start_info)
+	if home == null and not bool(start_info.get("known", false)):
+		# Older server without start fields: center on our first city the server listed.
+		home = _first_own_city_point()
+	if home_center_pending and home != null and map_view.size.x > 20 and map_view.size.y > 20:
+		map_view.center_on(home)
+		home_center_pending = false
+		fitted_once = true
+	elif not fitted_once and not map_cities.is_empty() and map_view.size.x > 20:
 		map_view.fit(map_cities)
 		fitted_once = map_view.fitted
 	map_view.queue_redraw()
+	_sync_resource_bar()
 	_sync_target_banner()
+
+
+func _first_own_city_point() -> Variant:
+	for city in cities:
+		if city is Dictionary and (city.get("x") is float or city.get("x") is int) and (city.get("y") is float or city.get("y") is int):
+			return Vector2(float(city["x"]), float(city["y"]))
+	return null
+
+
+func _sync_resource_bar() -> void:
+	if resource_bar == null:
+		return
+	var city := _active_city()
+	if city.is_empty():
+		city = _find(cities, StartLogic.home_city_id(start_info))
+	resource_bar.set_city(city, Present.field(city, "name") if not city.is_empty() else "")
 
 
 func _submit_player(kind: String) -> void:
@@ -432,6 +551,8 @@ func _finish_auth(res: Dictionary, mode: String) -> void:
 		_alert(locale.text("server_rejected"), str(interpreted.get("message", "")))
 		return
 	var payload: Dictionary = interpreted["payload"]
+	_reset_start()
+	start_info = StartLogic.parse(payload)
 	var previous_refresh := str(session.get("refresh_token", ""))
 	session = AuthLogic.apply_token_payload(AuthLogic.blank_session(), payload, mode)
 	if str(session.get("refresh_token", "")) == "" and mode == "player":
@@ -446,6 +567,7 @@ func _finish_auth(res: Dictionary, mode: String) -> void:
 
 func _force_logout(expired: bool) -> void:
 	session = AuthLogic.blank_session()
+	_reset_start()
 	api.access_token = ""
 	token_store.clear()
 	logged_in = false
@@ -644,6 +766,7 @@ func _on_city_picked(city_id: int) -> void:
 	if target_mode == "":
 		selected_city_id = city_id
 		tab = "city"
+		_scroll_side_to_top()
 		_layout()
 		_refresh_selected_city()
 		return
@@ -678,6 +801,7 @@ func _on_army_picked(army_id: int) -> void:
 	selected_army_id = army_id
 	if target_mode == "":
 		tab = "army"
+		_scroll_side_to_top()
 		_layout()
 		_render_side()
 
@@ -786,6 +910,7 @@ func _send_transfer() -> void:
 func _open_report(report_id: int) -> void:
 	open_report_id = report_id
 	tab = "reports"
+	_scroll_side_to_top()
 	var res := await _authed_get("/v1/me/reports/%s" % report_id)
 	if res.get("ok", false):
 		report_detail = res.get("json")
@@ -839,8 +964,8 @@ func _build_ui() -> void:
 	health_dot.custom_minimum_size = Vector2(14, 14)
 	game_top.add_child(health_dot)
 	var lang_btn := Button.new()
-	lang_btn.set_meta("i18n", "language")
-	lang_btn.custom_minimum_size = Vector2(64, 44)
+	lang_btn.set_meta("i18n", "language_switch")
+	lang_btn.custom_minimum_size = Vector2(52, 44)
 	lang_btn.pressed.connect(_toggle_lang)
 	game_top.add_child(lang_btn)
 	var settings_btn := Button.new()
@@ -848,11 +973,14 @@ func _build_ui() -> void:
 	settings_btn.custom_minimum_size = Vector2(44, 44)
 	settings_btn.pressed.connect(_set_tab.bind("settings"))
 	game_top.add_child(settings_btn)
-	var logout_btn := Button.new()
-	logout_btn.set_meta("i18n", "logout")
-	logout_btn.custom_minimum_size = Vector2(44, 44)
-	logout_btn.pressed.connect(_logout)
-	game_top.add_child(logout_btn)
+	top_logout_btn = Button.new()
+	top_logout_btn.set_meta("i18n", "logout")
+	top_logout_btn.custom_minimum_size = Vector2(44, 44)
+	top_logout_btn.pressed.connect(_logout)
+	game_top.add_child(top_logout_btn)
+	resource_bar = ResourceBar.new()
+	resource_bar.font = font
+	game_layer.add_child(resource_bar)
 
 	map_view = MapView.new()
 	map_view.font = font
@@ -911,6 +1039,7 @@ func _build_ui() -> void:
 	dialog_box.add_theme_constant_override("separation", 8)
 	dialog.add_child(dialog_box)
 	modal_title = Label.new()
+	modal_title.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	modal_title.add_theme_font_size_override("font_size", 22)
 	dialog_box.add_child(modal_title)
 	var body_scroll := ScrollContainer.new()
@@ -927,12 +1056,12 @@ func _build_ui() -> void:
 	dialog_box.add_child(dialog_buttons)
 	modal_cancel = Button.new()
 	modal_cancel.set_meta("i18n", "cancel")
-	modal_cancel.custom_minimum_size = Vector2(120, 48)
+	modal_cancel.custom_minimum_size = Vector2(110, 48)
 	modal_cancel.pressed.connect(_on_modal_cancel)
 	dialog_buttons.add_child(modal_cancel)
 	modal_ok = Button.new()
 	modal_ok.set_meta("i18n", "confirm")
-	modal_ok.custom_minimum_size = Vector2(160, 48)
+	modal_ok.custom_minimum_size = Vector2(140, 48)
 	modal_ok.pressed.connect(_on_modal_ok)
 	dialog_buttons.add_child(modal_ok)
 
@@ -1040,6 +1169,9 @@ func _submit_change_password() -> void:
 	else:
 		token_store.clear()
 	_hide_password_gate()
+	await _ensure_start()
+	if not logged_in:
+		return
 	await _refresh_world()
 
 
@@ -1189,8 +1321,10 @@ func _render_target_picker() -> void:
 			continue
 		if target_mode == "attack" and mine:
 			continue
-		var label := "%s (%s, %s)" % [city.get("name", ""), city.get("x", ""), city.get("y", "")]
-		_add_picker(side, label, _on_city_picked.bind(int(city.get("id", 0))))
+		var label := "%s (%s, %s)" % [Present.field(city, "name"), Present.field(city, "x"), Present.field(city, "y")]
+		if not mine:
+			label += "  · %s" % Present.field(city, "player_name")
+		_add_picker(side, label, _on_city_picked.bind(Present.id_of(city.get("id"))))
 	_add_action_button(side, "cancel", _cancel_target)
 
 
@@ -1202,12 +1336,13 @@ func _cancel_target() -> void:
 
 
 func _render_navigator() -> void:
+	_render_start_block(side)
 	_add_section(side, "your_cities")
 	if cities.is_empty():
 		_add_plain(side, locale.text("no_city"))
 	for city in cities:
 		if city is Dictionary:
-			_add_picker(side, "%s (%s, %s)" % [city.get("name", ""), city.get("x", ""), city.get("y", "")], _pick_city.bind(int(city.get("id", 0))))
+			_add_picker(side, "%s (%s, %s)" % [Present.field(city, "name"), Present.field(city, "x"), Present.field(city, "y")], _pick_city.bind(Present.id_of(city.get("id"))))
 	_add_section(side, "your_armies")
 	if armies.is_empty():
 		_add_plain(side, locale.text("no_army"))
@@ -1216,6 +1351,43 @@ func _render_navigator() -> void:
 			_add_army_row(army)
 	_add_plain(side, locale.text("map_hint"))
 	_add_idempotency_note(side)
+
+
+## Start fields as the server sent them. UNKNOWN when an older server omits them.
+func _render_start_block(parent: Node) -> void:
+	_add_section(parent, "start_title")
+	_add_plain(parent, "%s  %s" % [
+		locale.text("start_granted"),
+		StartLogic.granted_text(start_info, locale.text("yes"), locale.text("no")),
+	])
+	_add_plain(parent, "%s  %s" % [locale.text("home_city"), StartLogic.home_text(start_info)])
+	var army_text := Present.UNKNOWN
+	if start_info.get("army_id") != null:
+		army_text = _army_label(start_info.get("army_id"))
+	_add_plain(parent, "%s  %s" % [locale.text("start_army"), army_text])
+	if start_error != "":
+		var warn := Label.new()
+		warn.text = start_error
+		warn.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
+		warn.add_theme_color_override("font_color", Color("e09a32"))
+		parent.add_child(warn)
+	var home = StartLogic.home_point(start_info)
+	if home != null:
+		_add_action_button(parent, "go_home", _go_home)
+
+
+func _go_home() -> void:
+	var home = StartLogic.home_point(start_info)
+	if home == null:
+		return
+	var city_id := StartLogic.home_city_id(start_info)
+	if city_id != 0:
+		selected_city_id = city_id
+	tab = "map"
+	_layout()
+	map_view.center_on(home)
+	_sync_map()
+	_render_side()
 
 
 func _render_city() -> void:
@@ -1252,6 +1424,7 @@ func _render_city() -> void:
 		side.add_child(row)
 		var label := Label.new()
 		label.text = "%s  %s %s" % [building, locale.text("level"), level]
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(label)
 		_add_small_button(row, "build", _send_build.bind(building))
@@ -1266,6 +1439,7 @@ func _render_city() -> void:
 		side.add_child(row)
 		var label := Label.new()
 		label.text = "%s  %s %s" % [tech, locale.text("level"), Present.field(research, tech)]
+		label.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 		row.add_child(label)
 		_add_small_button(row, "research_action", _send_research.bind(tech))
@@ -1273,9 +1447,7 @@ func _render_city() -> void:
 	var garrison = city.get("garrison_army_ids", [])
 	if garrison is Array and not (garrison as Array).is_empty():
 		for army_id in garrison:
-			var army := _find(armies, int(army_id))
-			var army_name := Present.field(army, "name") if not army.is_empty() else Present.text(army_id)
-			_add_plain(side, "%s  %s" % [army_name, Present.text(army_id)])
+			_add_plain(side, _army_label(army_id))
 	else:
 		_add_plain(side, Present.text(garrison))
 	_add_section(side, "train")
@@ -1372,8 +1544,8 @@ func _render_army() -> void:
 		eta.set_meta("arrive", str(movement.get("arrive_at", "")))
 		eta.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 		side.add_child(eta)
-		_add_plain(side, "depart_at  %s" % movement.get("depart_at", ""))
-		_add_plain(side, "arrive_at  %s" % movement.get("arrive_at", ""))
+		_add_plain(side, "depart_at  %s" % Present.field(movement, "depart_at"))
+		_add_plain(side, "arrive_at  %s" % Present.field(movement, "arrive_at"))
 	_add_plain(side, locale.text("reinforce_help"))
 	_add_action_button(side, "reinforce", _begin_target.bind("reinforce"))
 	_add_plain(side, locale.text("move_help"))
@@ -1398,44 +1570,35 @@ func _render_reports() -> void:
 			_render_side()
 		)
 		var detail: Dictionary = report_detail
-		_add_plain(side, "#%s" % detail.get("id", ""))
-		_add_plain(side, "%s  %s" % [locale.text("winner"), Present.field(detail, "winner")])
-		_add_plain(side, "%s  %s    %s  %s" % [
-			locale.text("attacker"),
-			detail.get("attacker_player_id", ""),
-			locale.text("defender"),
-			detail.get("defender_player_id", ""),
-		])
-		_add_plain(side, "%s  %s" % [locale.text("seed"), Present.field(detail, "seed")])
-		_add_plain(side, "%s  %s" % [locale.text("rounds"), Present.text(detail.get("rounds"))])
-		_add_plain(side, "%s  %s" % [locale.text("created_at"), Present.field(detail, "created_at")])
-		_add_plain(side, "%s  %s    %s  %s" % [
-			locale.text("trace"),
-			Present.field(detail, "trace_id"),
-			"event",
-			Present.field(detail, "event_id"),
-		])
-		_add_plain(side, "%s  %s    %s  %s" % [
-			"movement",
-			Present.field(detail, "movement_id"),
-			locale.text("army"),
-			Present.field(detail, "attacker_army_id"),
-		])
+		_add_plain(side, "%s %s" % [locale.text("report"), Present.id_text(detail.get("id"))])
+		_add_plain(side, "%s  %s" % [locale.text("winner"), _winner_text(detail.get("winner"))])
+		_add_plain(side, "%s  %s" % [locale.text("attacker"), _player_label(detail.get("attacker_player_id"))])
+		_add_plain(side, "%s  %s" % [locale.text("defender"), _player_label(detail.get("defender_player_id"))])
+		_add_plain(side, "%s  %s" % [locale.text("attacker_army"), _army_label(detail.get("attacker_army_id"))])
 		_add_plain(side, "%s  %s" % [locale.text("city"), _city_label(detail.get("defender_city_id"))])
+		_add_plain(side, "%s  %s" % [locale.text("created_at"), Present.field(detail, "created_at")])
+		_add_section(side, "rounds")
+		_add_round_table(side, detail.get("rounds"))
 		_add_section(side, "before")
-		_add_plain(side, "attacker  %s" % _units_text(detail.get("attacker_before")))
-		_add_plain(side, "defender  %s" % _units_text(detail.get("defender_before")))
+		_add_plain(side, "%s\n%s" % [locale.text("attacker"), _units_text(detail.get("attacker_before"))])
+		_add_plain(side, "%s\n%s" % [locale.text("defender"), _units_text(detail.get("defender_before"))])
 		_add_section(side, "remaining")
-		_add_plain(side, "attacker  %s" % _units_text(detail.get("attacker_remaining")))
-		_add_plain(side, "defender  %s" % _units_text(detail.get("defender_remaining")))
-		_add_section(side, "defender_resources")
-		_add_plain(side, JsonText.pretty(detail.get("defender_resources")))
+		_add_plain(side, "%s\n%s" % [locale.text("attacker"), _units_text(detail.get("attacker_remaining"))])
+		_add_plain(side, "%s\n%s" % [locale.text("defender"), _units_text(detail.get("defender_remaining"))])
 		_add_section(side, "casualties")
-		_add_plain(side, "attacker  %s" % JsonText.pretty(detail.get("attacker_casualties")))
-		_add_plain(side, "defender  %s" % JsonText.pretty(detail.get("defender_casualties")))
+		_add_plain(side, "%s\n%s" % [locale.text("attacker"), _units_text(detail.get("attacker_casualties"))])
+		_add_plain(side, "%s\n%s" % [locale.text("defender"), _units_text(detail.get("defender_casualties"))])
+		_add_section(side, "defender_resources")
+		_add_plain(side, _resources_text(detail.get("defender_resources")))
 		_add_section(side, "loot")
-		_add_plain(side, JsonText.pretty(detail.get("loot")))
+		_add_plain(side, _resources_text(detail.get("loot")))
 		_add_section(side, "server_record")
+		_add_plain(side, "%s  %s" % [locale.text("seed"), Present.field(detail, "seed")])
+		_add_plain(side, "%s  %s" % [locale.text("trace"), Present.field(detail, "trace_id")])
+		_add_plain(side, "event  %s    movement  %s" % [
+			Present.field(detail, "event_id"),
+			Present.field(detail, "movement_id"),
+		])
 		_add_plain(side, JsonText.pretty(detail))
 		return
 	if reports.is_empty():
@@ -1443,8 +1606,15 @@ func _render_reports() -> void:
 		return
 	for report in reports:
 		if report is Dictionary:
-			var label := "#%s  %s %s" % [Present.field(report, "id"), locale.text("winner"), Present.field(report, "winner")]
-			_add_picker(side, label, _open_report.bind(int(report.get("id", 0))))
+			var label := "%s  %s %s\n%s %s %s" % [
+				Present.id_text(report.get("id")),
+				locale.text("winner"),
+				_winner_text(report.get("winner")),
+				_player_label(report.get("attacker_player_id")),
+				locale.text("attacked"),
+				_city_label(report.get("defender_city_id")),
+			]
+			_add_picker(side, label, _open_report.bind(Present.id_of(report.get("id"))))
 
 
 func _apply_settings_url(editor: LineEdit) -> void:
@@ -1462,10 +1632,11 @@ func _render_settings() -> void:
 	_add_plain(side, "%s  %s" % [locale.text("player"), Present.field(account, "player_name")])
 	_add_plain(side, "%s  %s    %s  %s" % [
 		locale.text("locked"),
-		Present.field(account, "locked"),
+		_bool_text(account, "locked"),
 		locale.text("has_password"),
-		Present.field(account, "has_password"),
+		_bool_text(account, "has_password"),
 	])
+	_render_start_block(side)
 	_add_plain(side, "%s  %s %s" % [
 		locale.text("server_version"),
 		Present.field(server_meta, "name"),
@@ -1484,6 +1655,7 @@ func _render_settings() -> void:
 	_add_idempotency_note(side)
 	if bool(caps.get("change_password", false)):
 		_add_action_button(side, "change_password", _show_password_gate.bind(locale.text("change_password")))
+	_add_action_button(side, "logout", _logout)
 	if bool(caps.get("logout_all", false)):
 		_add_action_button(side, "logout_all", _logout_all)
 	_add_section(side, "unavailable_actions")
@@ -1500,10 +1672,13 @@ func _render_settings() -> void:
 
 func _add_army_row(army: Dictionary) -> void:
 	var selected := int(army.get("id", 0)) == selected_army_id
-	var label := "%s  %s" % [army.get("name", army.get("id", "")), army.get("status", "")]
+	var name_text := Present.field(army, "name")
+	if name_text == Present.UNKNOWN:
+		name_text = Present.id_text(army.get("id"))
+	var label := "%s  %s" % [name_text, Present.field(army, "status")]
 	if selected:
 		label = "• " + label
-	_add_picker(side, label, _pick_army.bind(int(army.get("id", 0))))
+	_add_picker(side, label, _pick_army.bind(Present.id_of(army.get("id"))))
 
 
 func _add_disabled_or_form(parent: Node, cap_key: String, endpoint: String, builder: Callable) -> void:
@@ -1549,6 +1724,7 @@ func _add_picker(parent: Node, text: String, cb: Callable) -> void:
 	var button := Button.new()
 	button.text = text
 	button.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	button.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	button.custom_minimum_size = Vector2(0, 44)
 	button.pressed.connect(cb)
 	parent.add_child(button)
@@ -1557,6 +1733,7 @@ func _add_picker(parent: Node, text: String, cb: Callable) -> void:
 func _add_action_button(parent: Node, key: String, cb: Callable) -> void:
 	var button := Button.new()
 	button.set_meta("i18n", key)
+	button.autowrap_mode = TextServer.AUTOWRAP_WORD_SMART
 	button.custom_minimum_size = Vector2(0, 48)
 	button.pressed.connect(cb)
 	parent.add_child(button)
@@ -1581,8 +1758,14 @@ func _spin(min_value: int, max_value: int, value: int) -> SpinBox:
 	return spin
 
 
+func _scroll_side_to_top() -> void:
+	if side_scroll != null:
+		side_scroll.scroll_vertical = 0
+
+
 func _pick_city(city_id: int) -> void:
 	selected_city_id = city_id
+	_scroll_side_to_top()
 	tab = "city"
 	_layout()
 	_refresh_selected_city()
@@ -1590,6 +1773,7 @@ func _pick_city(city_id: int) -> void:
 
 func _pick_army(army_id: int) -> void:
 	selected_army_id = army_id
+	_scroll_side_to_top()
 	tab = "army"
 	_layout()
 	_render_side()
@@ -1598,6 +1782,7 @@ func _pick_army(army_id: int) -> void:
 
 func _set_tab(next: String) -> void:
 	tab = next
+	_scroll_side_to_top()
 	if next != "reports":
 		open_report_id = 0
 	_layout()
@@ -1625,15 +1810,23 @@ func _layout() -> void:
 	auth_scroll.position = Vector2((size.x - panel_w) * 0.5, 8)
 	auth_scroll.size = Vector2(panel_w, max(0.0, size.y - 16))
 	var narrow := size.x < 900.0
+	var phone := size.x < 600.0
 	var top_h := 56.0
+	var res_h := 34.0
 	var tab_h := 56.0
 	game_top.position = Vector2(8, 6)
 	game_top.size = Vector2(max(0.0, size.x - 16), top_h - 8)
+	if top_logout_btn != null:
+		# On a phone the log-out button moves to the settings tab so the top bar fits.
+		top_logout_btn.visible = not phone
+	if resource_bar != null:
+		resource_bar.position = Vector2(0, top_h)
+		resource_bar.size = Vector2(size.x, res_h)
 	tab_bar.visible = true
 	tab_bar.position = Vector2(4, size.y - tab_h)
 	tab_bar.size = Vector2(max(0.0, size.x - 8), tab_h)
-	var body_top := top_h
-	var body_h: float = max(0.0, size.y - top_h - tab_h)
+	var body_top := top_h + res_h
+	var body_h: float = max(0.0, size.y - body_top - tab_h)
 	var show_panel := target_mode != "" or not narrow or tab != "map"
 	if narrow and show_panel:
 		map_view.position = Vector2(0, body_top)
@@ -1669,6 +1862,14 @@ func _layout() -> void:
 		dialog.offset_bottom = dialog_h * 0.5
 		if modal_body != null:
 			modal_body.custom_minimum_size = Vector2(dialog_w - 48.0, 0)
+	if password_gate != null and password_gate.get_child_count() > 1:
+		var gate_box := password_gate.get_child(1) as Control
+		var gate_w: float = min(520.0, max(260.0, size.x - 24.0))
+		var gate_h: float = min(440.0, max(240.0, size.y - 24.0))
+		gate_box.offset_left = -gate_w * 0.5
+		gate_box.offset_right = gate_w * 0.5
+		gate_box.offset_top = -gate_h * 0.5
+		gate_box.offset_bottom = gate_h * 0.5
 	if logged_in and not fitted_once:
 		_sync_map()
 
@@ -1723,15 +1924,110 @@ func _pick_transfer_dest(city_id: int) -> void:
 	_render_side()
 
 
+## Name for a city id from the server's city lists, or "#id" when no list has it.
 func _city_label(city_id: Variant) -> String:
-	if city_id == null or str(city_id) == "":
-		return Present.UNKNOWN
-	var found := _find(cities, int(city_id))
-	if found.is_empty():
-		found = _find(map_cities, int(city_id))
-	if found.is_empty():
+	var id := Present.id_of(city_id)
+	if id == 0:
 		return Present.text(city_id)
-	return "%s (%s)" % [Present.field(found, "name"), Present.text(city_id)]
+	var found := _find(cities, id)
+	if found.is_empty():
+		found = _find(map_cities, id)
+	if found.is_empty() or Present.field(found, "name") == Present.UNKNOWN:
+		return Present.id_text(city_id)
+	return Present.field(found, "name")
+
+
+## Name for an army id from GET /v1/me/armies, or "#id".
+func _army_label(army_id: Variant) -> String:
+	var id := Present.id_of(army_id)
+	if id == 0:
+		return Present.text(army_id)
+	var found := _find(armies, id)
+	if found.is_empty() or Present.field(found, "name") == Present.UNKNOWN:
+		return Present.id_text(army_id)
+	return Present.field(found, "name")
+
+
+## Name for a player id: ours from the session, others from player_name on the map.
+func _player_label(player_id: Variant) -> String:
+	var id := Present.id_of(player_id)
+	if id == 0:
+		return Present.text(player_id)
+	if id == int(session.get("player_id", 0)) and str(session.get("player_name", "")) != "":
+		return str(session.get("player_name", ""))
+	for city in map_cities:
+		if city is Dictionary and Present.id_of(city.get("player_id")) == id:
+			var name := Present.field(city, "player_name")
+			if name != Present.UNKNOWN:
+				return name
+	return Present.id_text(player_id)
+
+
+func _bool_text(row: Dictionary, key: String) -> String:
+	var value = row.get(key)
+	if value is bool:
+		return locale.text("yes") if value else locale.text("no")
+	return Present.field(row, key)
+
+
+func _winner_text(value: Variant) -> String:
+	var raw := Present.text(value)
+	if raw in ["attacker", "defender", "draw"]:
+		return locale.text("winner_%s" % raw)
+	return raw
+
+
+## "wood 10  food 5" from a resource map the server sent.
+func _resources_text(value: Variant) -> String:
+	if value == null:
+		return Present.UNKNOWN
+	if not (value is Dictionary):
+		return Present.text(value)
+	if (value as Dictionary).is_empty():
+		return locale.text("none")
+	var parts := PackedStringArray()
+	for key in (value as Dictionary).keys():
+		var name := str(key)
+		if name in ["wood", "food", "iron", "gold"]:
+			name = locale.text(name)
+		parts.append("%s %s" % [name, Present.text(value[key])])
+	return "   ".join(parts)
+
+
+## Per-round table. Every cell is a server value; nothing is recomputed.
+func _add_round_table(parent: Node, rounds: Variant) -> void:
+	if not (rounds is Array):
+		_add_plain(parent, Present.text(rounds))
+		return
+	if (rounds as Array).is_empty():
+		_add_plain(parent, locale.text("none"))
+		return
+	var grid := GridContainer.new()
+	grid.columns = 4
+	grid.add_theme_constant_override("h_separation", 10)
+	grid.add_theme_constant_override("v_separation", 2)
+	grid.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	parent.add_child(grid)
+	for key in ["round_col", "dmg_to_attacker", "dmg_to_defender", "variance_bp"]:
+		var head := Label.new()
+		head.text = locale.text(key)
+		head.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		head.custom_minimum_size = Vector2(48, 0)
+		head.add_theme_font_size_override("font_size", 14)
+		head.add_theme_color_override("font_color", Color("9fb3c8"))
+		grid.add_child(head)
+	for row in Present.round_rows(rounds):
+		for i in (row as Array).size():
+			var cell := Label.new()
+			cell.text = str(row[i])
+			cell.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+			cell.add_theme_font_size_override("font_size", 15)
+			if i == 1:
+				cell.add_theme_color_override("font_color", Color("f28b82"))
+			elif i == 2:
+				cell.add_theme_color_override("font_color", Color("a8dadc"))
+			grid.add_child(cell)
+	_add_plain(parent, locale.text("variance_hint"))
 
 
 func _units_text(value: Variant) -> String:
@@ -1928,6 +2224,8 @@ func _make_theme(text_font: Font) -> Theme:
 	line.content_margin_right = 8
 	line.content_margin_top = 6
 	line.content_margin_bottom = 6
+	line.set_border_width_all(1)
+	line.border_color = Color("33415a")
 	next.set_stylebox("normal", "LineEdit", line)
 	next.set_color("font_color", "LineEdit", Color("f2f4f8"))
 	next.set_color("font_placeholder_color", "LineEdit", Color("9aa3b2"))

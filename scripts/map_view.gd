@@ -22,6 +22,10 @@ var camera := Vector2(25, 30)
 var zoom := 14.0
 var fitted := false
 
+## Screen points used by the last draw, so taps hit what is on screen.
+var _city_marks: Array = []
+var _army_marks: Array = []
+
 var _dragging := false
 var _moved := false
 var _drag_origin := Vector2.ZERO
@@ -57,6 +61,15 @@ func fit(list: Array) -> void:
 	var span: float = max(max_x - min_x, max_y - min_y)
 	span = max(span, 30.0)
 	zoom = clampf(min(size.x, size.y) * 0.62 / span, 6.0, 28.0)
+	fitted = true
+	queue_redraw()
+
+
+## Center on one world point (the server's home city) at a zoom where nearby
+## cities are visible.
+func center_on(world: Vector2, zoom_level: float = 18.0) -> void:
+	camera = world
+	zoom = clampf(zoom_level, 4.0, 64.0)
 	fitted = true
 	queue_redraw()
 
@@ -154,49 +167,77 @@ func _touch_midpoint() -> Vector2:
 
 func _pick(screen_pos: Vector2) -> void:
 	if target_mode == "":
-		var army_id := _closest_army(screen_pos)
+		var army_id := _closest(_army_marks, screen_pos)
 		if army_id != 0:
 			army_picked.emit(army_id)
 			return
-	var city_id := _closest_city(screen_pos)
+	var city_id := _closest(_city_marks, screen_pos)
 	if city_id != 0:
 		city_picked.emit(city_id)
 		return
 	point_picked.emit(_screen_to_world(screen_pos))
 
 
-func _closest_city(screen_pos: Vector2) -> int:
+func _closest(marks: Array, screen_pos: Vector2) -> int:
 	var best_id := 0
 	var best := HIT_RADIUS
+	for mark in marks:
+		var distance := (mark["point"] as Vector2).distance_to(screen_pos)
+		if distance < best:
+			best = distance
+			best_id = int(mark["id"])
+	return best_id
+
+
+func _is_mine(city: Dictionary) -> bool:
+	if city.has("is_mine"):
+		return bool(city["is_mine"])
+	return Present.id_of(city.get("player_id")) == my_player_id and my_player_id != 0
+
+
+## Screen positions for every visible city and army. A garrisoned army stands on
+## its city's tile, so its marker is nudged beside the city instead of covering it.
+func _compute_marks() -> void:
+	_city_marks = []
+	_army_marks = []
+	var pad := Rect2(Vector2(-60, -60), size + Vector2(120, 120))
+	var city_points: Array = []
 	for city in cities:
 		if not (city is Dictionary) or not city.has("x") or not city.has("y"):
 			continue
 		var point := _world_to_screen(Vector2(float(city["x"]), float(city["y"])))
-		var distance := point.distance_to(screen_pos)
-		if distance < best:
-			best = distance
-			best_id = int(city.get("id", 0))
-	return best_id
-
-
-func _closest_army(screen_pos: Vector2) -> int:
-	var best_id := 0
-	var best := HIT_RADIUS
-	for army in armies:
-		if not (army is Dictionary):
+		if not pad.has_point(point):
 			continue
-		if not MovementInterp.known_position(army, now_ms):
+		city_points.append(point)
+		_city_marks.append({
+			"id": Present.id_of(city.get("id")),
+			"point": point,
+			"mine": _is_mine(city),
+			"label": Present.field(city, "name"),
+		})
+	var army_rows: Array = []
+	var army_points: Array = []
+	for army in armies:
+		if not (army is Dictionary) or not MovementInterp.known_position(army, now_ms):
 			continue
 		var point := _world_to_screen(MovementInterp.army_position(army, now_ms))
-		var distance := point.distance_to(screen_pos)
-		if distance < best:
-			best = distance
-			best_id = int(army.get("id", 0))
-	return best_id
+		if not pad.has_point(point):
+			continue
+		army_rows.append(army)
+		army_points.append(point)
+	var moved := LabelLayout.offset_markers(city_points, army_points, 20.0, Vector2(18, -14))
+	for i in army_rows.size():
+		var army: Dictionary = army_rows[i]
+		_army_marks.append({
+			"id": Present.id_of(army.get("id")),
+			"point": moved[i],
+			"anchor": army_points[i],
+			"label": Present.field(army, "name"),
+		})
 
 
 func _draw() -> void:
-	draw_rect(Rect2(Vector2.ZERO, size), Color("12171f"))
+	draw_rect(Rect2(Vector2.ZERO, size), Color("142019"))
 	var top_left := _screen_to_world(Vector2.ZERO)
 	var bottom_right := _screen_to_world(size)
 	var start_x := int(floor(min(top_left.x, bottom_right.x) / 10.0)) * 10 - 10
@@ -204,14 +245,12 @@ func _draw() -> void:
 	var start_y := int(floor(min(top_left.y, bottom_right.y) / 10.0)) * 10 - 10
 	var end_y := int(ceil(max(top_left.y, bottom_right.y) / 10.0)) * 10 + 10
 	var grid := Color(1, 1, 1, 0.06)
-	for x in range(start_x, end_x + 1, 10):
-		var from := _world_to_screen(Vector2(x, start_y))
-		var to := _world_to_screen(Vector2(x, end_y))
-		draw_line(from, to, grid, 1.0)
-	for y in range(start_y, end_y + 1, 10):
-		var from := _world_to_screen(Vector2(start_x, y))
-		var to := _world_to_screen(Vector2(end_x, y))
-		draw_line(from, to, grid, 1.0)
+	if end_x - start_x < 4000 and end_y - start_y < 4000:
+		for x in range(start_x, end_x + 1, 10):
+			draw_line(_world_to_screen(Vector2(x, start_y)), _world_to_screen(Vector2(x, end_y)), grid, 1.0)
+		for y in range(start_y, end_y + 1, 10):
+			draw_line(_world_to_screen(Vector2(start_x, y)), _world_to_screen(Vector2(end_x, y)), grid, 1.0)
+	_compute_marks()
 	for army in armies:
 		if not (army is Dictionary):
 			continue
@@ -221,43 +260,81 @@ func _draw() -> void:
 			if dest is Dictionary and dest.has("x") and dest.has("y"):
 				var here := MovementInterp.army_position(army, now_ms)
 				var there := Vector2(float(dest["x"]), float(dest["y"]))
-				draw_line(_world_to_screen(here), _world_to_screen(there), Color("8ecae6a0"), 2.0)
-	for city in cities:
-		if not (city is Dictionary) or not city.has("x") or not city.has("y"):
-			continue
-		var point := _world_to_screen(Vector2(float(city["x"]), float(city["y"])))
-		var mine := bool(city.get("is_mine", int(city.get("player_id", -1)) == my_player_id))
-		var color := Color("f0c14a") if mine else Color("e07a5f")
-		draw_circle(point, 11.0, color)
-		if int(city.get("id", 0)) == selected_city_id:
-			draw_arc(point, 16.0, 0, TAU, 24, Color("f7f7f2"), 2.0)
-		if font != null:
-			var label := Present.field(city, "name")
-			draw_string(font, point + Vector2(14, 4), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("f2f4f8"))
-	for army in armies:
-		if not (army is Dictionary):
-			continue
-		if not MovementInterp.known_position(army, now_ms):
-			continue
-		var point := _world_to_screen(MovementInterp.army_position(army, now_ms))
-		var selected := int(army.get("id", 0)) == selected_army_id
-		draw_colored_polygon(
-			PackedVector2Array([
-				point + Vector2(0, -12),
-				point + Vector2(10, 8),
-				point + Vector2(-10, 8),
-			]),
-			Color("f7f7f2") if selected else Color("8ecae6")
-		)
-		if font != null:
-			draw_string(font, point + Vector2(12, -6), Present.field(army, "name"), HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("d7eef7"))
-	if font != null and legend_own != "":
-		draw_circle(Vector2(18, 18), 6, Color("f0c14a"))
-		draw_string(font, Vector2(30, 24), legend_own, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("f2f4f8"))
-		draw_circle(Vector2(18, 40), 6, Color("e07a5f"))
-		draw_string(font, Vector2(30, 46), legend_other, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("f2f4f8"))
-		draw_colored_polygon(
-			PackedVector2Array([Vector2(18, 54), Vector2(24, 66), Vector2(12, 66)]),
-			Color("8ecae6")
-		)
-		draw_string(font, Vector2(30, 68), legend_army, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, Color("f2f4f8"))
+				draw_dashed_line(_world_to_screen(here), _world_to_screen(there), Color("8ecae6c0"), 2.0, 8.0)
+	for mark in _city_marks:
+		var point: Vector2 = mark["point"]
+		draw_circle(point + Vector2(0, 10), 11.0, Color(0, 0, 0, 0.25))
+		if int(mark["id"]) == selected_city_id:
+			draw_arc(point, 19.0, 0, TAU, 32, Icons.SELECT, 2.0)
+		if bool(mark["mine"]):
+			Icons.own_city(self, point, 1.1)
+		else:
+			Icons.other_city(self, point, 1.0)
+	for mark in _army_marks:
+		var point: Vector2 = mark["point"]
+		var anchor: Vector2 = mark["anchor"]
+		if point.distance_to(anchor) > 1.0:
+			draw_line(anchor, point, Color("8ecae680"), 1.0)
+		Icons.army(self, point, 1.0, int(mark["id"]) == selected_army_id)
+	if font != null:
+		_draw_labels()
+		_draw_legend()
+
+
+func _draw_labels() -> void:
+	var fs := 14
+	var items: Array = []
+	var texts: Array = []
+	var colors: Array = []
+	for mark in _city_marks:
+		var text: String = mark["label"]
+		items.append({"anchor": mark["point"], "radius": 14.0, "size": _label_size(text, fs), "prefer": "below"})
+		texts.append(text)
+		colors.append(Color("ffe8a3") if bool(mark["mine"]) else Color("f2f4f8"))
+	for mark in _army_marks:
+		var text: String = mark["label"]
+		items.append({"anchor": mark["point"], "radius": 11.0, "size": _label_size(text, fs), "prefer": "right"})
+		texts.append(text)
+		colors.append(Color("d7eef7"))
+	if items.size() > 160:
+		return
+	var rects := LabelLayout.place(items, Rect2(Vector2(2, 2), size - Vector2(4, 34)))
+	for i in rects.size():
+		var rect: Rect2 = rects[i]
+		draw_rect(rect, Color(0.05, 0.07, 0.1, 0.72))
+		draw_string(font, rect.position + Vector2(4, fs + 1), texts[i], HORIZONTAL_ALIGNMENT_LEFT, -1, fs, colors[i])
+
+
+func _label_size(text: String, fs: int) -> Vector2:
+	var measured := font.get_string_size(text, HORIZONTAL_ALIGNMENT_LEFT, -1, fs)
+	return Vector2(measured.x + 8.0, fs + 7.0)
+
+
+## One row along the bottom edge of the map so it does not cover a short phone map.
+func _draw_legend() -> void:
+	if legend_own == "":
+		return
+	var fs := 13
+	var rows := [legend_own, legend_other, legend_army]
+	var widths: Array = []
+	var total := 8.0
+	for row in rows:
+		var w: float = font.get_string_size(row, HORIZONTAL_ALIGNMENT_LEFT, -1, fs).x
+		widths.append(w)
+		total += 22.0 + w + 12.0
+	var h := 24.0
+	var origin := Vector2(6, size.y - h - 6)
+	draw_rect(Rect2(origin, Vector2(total, h)), Color(0.05, 0.07, 0.1, 0.75))
+	var x := origin.x + 8.0
+	var mid := origin.y + h * 0.5
+	for i in rows.size():
+		var c := Vector2(x + 8.0, mid)
+		match i:
+			0:
+				Icons.own_city(self, c, 0.6)
+			1:
+				Icons.other_city(self, c, 0.6)
+			_:
+				Icons.army(self, c, 0.7)
+		draw_string(font, Vector2(x + 20.0, mid + fs * 0.35), rows[i], HORIZONTAL_ALIGNMENT_LEFT, -1, fs, Color("f2f4f8"))
+		x += 22.0 + float(widths[i]) + 12.0
