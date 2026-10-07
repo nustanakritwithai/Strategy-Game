@@ -602,6 +602,8 @@ func _on_point_picked(world: Vector2) -> void:
 func _queue(body: Dictionary, path: String) -> void:
 	target_mode = ""
 	_sync_target_banner()
+	_layout()
+	_render_side()
 	_open_confirm(_order_summary(path, body), {"path": path, "body": body})
 
 
@@ -941,18 +943,45 @@ func _render_side() -> void:
 	for child in old:
 		side.remove_child(child)
 		child.free()
-	match tab:
-		"city":
-			_render_city()
-		"army":
-			_render_army()
-		"reports":
-			_render_reports()
-		"settings":
-			_render_settings()
-		_:
-			_render_navigator()
+	if target_mode != "":
+		_render_target_picker()
+	else:
+		match tab:
+			"city":
+				_render_city()
+			"army":
+				_render_army()
+			"reports":
+				_render_reports()
+			"settings":
+				_render_settings()
+			_:
+				_render_navigator()
 	_apply_static_text()
+
+
+func _render_target_picker() -> void:
+	_add_section(side, "target")
+	_add_plain(side, locale.text("tap_city") if target_mode != "attack" else locale.text("tap_enemy_city"))
+	var own_only := target_mode in ["reinforce", "move", "garrison", "transfer"]
+	for city in map_cities:
+		if not (city is Dictionary):
+			continue
+		var mine := bool(city.get("is_mine", false))
+		if own_only and not mine:
+			continue
+		if target_mode == "attack" and mine:
+			continue
+		var label := "%s (%s, %s)" % [city.get("name", ""), city.get("x", ""), city.get("y", "")]
+		_add_picker(side, label, _on_city_picked.bind(int(city.get("id", 0))))
+	_add_action_button(side, "cancel", _cancel_target)
+
+
+func _cancel_target() -> void:
+	target_mode = ""
+	_sync_target_banner()
+	_layout()
+	_render_side()
 
 
 func _render_navigator() -> void:
@@ -1332,9 +1361,7 @@ func _layout() -> void:
 	tab_bar.size = Vector2(max(0.0, size.x - 8), tab_h)
 	var body_top := top_h
 	var body_h: float = max(0.0, size.y - top_h - tab_h)
-	var show_panel := not narrow or tab != "map"
-	if target_mode != "":
-		show_panel = false
+	var show_panel := target_mode != "" or not narrow or tab != "map"
 	if narrow and show_panel:
 		map_view.position = Vector2(0, body_top)
 		map_view.size = Vector2(size.x, body_h * 0.38)

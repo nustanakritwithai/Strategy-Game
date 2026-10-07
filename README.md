@@ -15,7 +15,7 @@
 5. **โหมดนักพัฒนา** ปิดอยู่เป็นค่าเริ่มต้น เมื่อเปิด จะเรียก `POST /v1/auth/dev-login` ซึ่งเป็นตัวแทนชั่วคราว ไม่ใช่บัญชีจริง ป้ายบนหน้าจอเกมจะบอกว่าเป็นโหมดนี้อยู่
 6. ลากแผนที่เพื่อเลื่อน ใช้ลูกกลิ้งหรือบีบนิ้วเพื่อซูม แตะเมืองหรือทัพ เมืองของเราเป็นสีทอง เมืองคนอื่นเป็นสีส้ม ทัพเป็นสามเหลี่ยมสีฟ้า ตำแหน่งทัพระหว่างเดินทางคำนวณจาก `depart_at` / `arrive_at` ที่เซิร์ฟเวอร์ให้มา เพื่อแสดงผลเท่านั้น
 7. เมือง: ทรัพยากร อาคาร งานวิจัย กองประจำการ ตามค่าล่าสุดจากเซิร์ฟเวอร์ สั่งก่อสร้างและวิจัยได้ทันที
-8. ทัพ: เสริมกำลัง ย้ายถิ่นฐาน โจมตี เรียกกลับ เลือกเป้าหมายบนแผนที่ แล้วยืนยัน ข้อความที่เซิร์ฟเวอร์ปฏิเสธจะแสดงตามที่ส่งมา
+8. ทัพ: เสริมกำลัง ย้ายถิ่นฐาน โจมตี เรียกกลับ เลือกเป้าหมายบนแผนที่ หรือจากรายชื่อเมืองด้านข้างเมื่อจุดทับกัน แล้วยืนยัน ข้อความที่เซิร์ฟเวอร์ปฏิเสธจะแสดงตามที่ส่งมา
 9. ฝึกหน่วย สร้างเมือง ประจำการ และโอนทรัพยากรจะกดได้เมื่อ OpenAPI ของเซิร์ฟเวอร์มี `POST /v1/commands/train`, `/found-city`, `/garrison`, `/transfer` ถ้ายังไม่มี ปุ่มจะถูกปิดพร้อมบอก endpoint ที่รออยู่
 10. รายงานการรบมาจาก `GET /v1/me/reports` และ `GET /v1/me/reports/{id}` ทั้งรายการและรายละเอียด
 11. สลับภาษาไทย/อังกฤษได้จากหน้าเข้าสู่ระบบหรือแถบบน ภาษาเริ่มต้นคือไทย ฟอนต์ Noto Sans Thai (SIL Open Font License, ดู `fonts/OFL.txt`)
@@ -88,7 +88,7 @@ Default server: `https://157-85-96-139.sslip.io`
 5. **Dev mode** is off by default. Turning it on calls `POST /v1/auth/dev-login`, a placeholder rather than an account. The game bar keeps that label visible.
 6. Drag the map to pan. Scroll or pinch to zoom. Tap a city or an army. Your cities are gold, other cities are orange, armies are blue triangles. A marching army is drawn from the server `depart_at` and `arrive_at` for display only.
 7. The city panel shows resources, buildings, research, and the garrison from the latest server payload. Build and research can be sent now.
-8. Army orders are reinforce, relocate, attack, and recall. Pick the target on the map, then confirm. If the server rejects the order, its message is shown as sent.
+8. Army orders are reinforce, relocate, attack, and recall. Pick the target on the map, or from the city list shown beside the map when markers overlap, then confirm. If the server rejects the order, its message is shown as sent.
 9. Train, found city, garrison, and transfer stay disabled until the server OpenAPI lists `POST /v1/commands/train`, `/found-city`, `/garrison`, and `/transfer`. The disabled row names the missing route.
 10. Battle reports come from `GET /v1/me/reports` and `GET /v1/me/reports/{id}`.
 11. Switch Thai and English from the sign-in screen or the top bar. Thai is the default. The font is Noto Sans Thai (SIL Open Font License, see `fonts/OFL.txt`).
