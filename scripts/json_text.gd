@@ -53,6 +53,8 @@ static func pretty(value: Variant, indent: int = 0) -> String:
 		return "true" if value else "false"
 	if value is String:
 		return value
+	if value is float:
+		return Present.number(value)
 	return str(value)
 
 

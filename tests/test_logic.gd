@@ -26,6 +26,14 @@ func cases() -> Array:
 		["settings_store_roundtrip", _settings_store_roundtrip],
 		["exact_server_integers", _exact_server_integers],
 		["maintenance_banner", _maintenance_banner],
+		["whole_numbers_as_integers", _whole_numbers_as_integers],
+		["battle_round_rows", _battle_round_rows],
+		["start_parse_and_claim", _start_parse_and_claim],
+		["start_unknown_on_old_server", _start_unknown_on_old_server],
+		["claim_start_route", _claim_start_route],
+		["label_layout_no_overlap", _label_layout_no_overlap],
+		["army_marker_offset", _army_marker_offset],
+		["thai_is_default", _thai_is_default],
 	]
 
 
@@ -437,4 +445,141 @@ func _maintenance_banner() -> String:
 	var text := ApiError.verbatim({"error": {"code": "maintenance", "message": "world is in maintenance; player commands are not accepted"}}, 503)
 	if not text.contains("world is in maintenance") or not text.contains("code: maintenance"):
 		return text
+	return ""
+
+
+func _whole_numbers_as_integers() -> String:
+	var parsed: Variant = JsonText.parse_preserving_integers(
+		'{"id":1,"attacker_player_id":1,"defender_player_id":2,"rounds":[{"round":1,"damage_to_defender":61}],"ratio":1.5,"seed":8752478362702228813}'
+	)
+	var row: Dictionary = parsed
+	if Present.id_text(row["id"]) != "#1":
+		return "id %s" % Present.id_text(row["id"])
+	if Present.field(row, "attacker_player_id") != "1" or Present.field(row, "defender_player_id") != "2":
+		return "player ids"
+	var compact := Present.text(row["rounds"])
+	if compact.contains(".0") or not compact.contains("round: 1") or not compact.contains("61"):
+		return "compact %s" % compact
+	var pretty := JsonText.pretty(row)
+	if pretty.contains("1.0") or pretty.contains("61.0"):
+		return "pretty %s" % pretty
+	if not pretty.contains("8752478362702228813") or not pretty.contains("1.5"):
+		return "pretty lost exact values"
+	if Present.text(1.5) != "1.5":
+		return "fraction dropped"
+	if Present.id_of(3.0) != 3 or Present.id_of(null) != 0 or Present.id_of("7") != 7:
+		return "id_of"
+	if Present.id_text(null) != "UNKNOWN":
+		return "missing id"
+	return ""
+
+
+func _battle_round_rows() -> String:
+	var parsed: Variant = JsonText.parse_preserving_integers(
+		'[{"round":1,"attacker_variance_bp":9500,"defender_variance_bp":10400,"damage_to_attacker":12,"damage_to_defender":61},{"round":2}]'
+	)
+	var rows := Present.round_rows(parsed)
+	if rows.size() != 2:
+		return "rows %s" % rows.size()
+	if rows[0] != ["1", "12", "61", "9500 / 10400"]:
+		return "row %s" % str(rows[0])
+	if rows[1] != ["2", "UNKNOWN", "UNKNOWN", "UNKNOWN / UNKNOWN"]:
+		return "missing keys %s" % str(rows[1])
+	if not Present.round_rows(null).is_empty():
+		return "null rounds"
+	return ""
+
+
+func _start_parse_and_claim() -> String:
+	var parsed: Variant = JsonText.parse_preserving_integers(
+		'{"start_granted":true,"home_city":{"id":3,"name":"ada Home","x":-500,"y":-500},"army_id":3}'
+	)
+	var info := StartLogic.parse(parsed)
+	if StartLogic.needs_claim(info) or not StartLogic.granted(info):
+		return "granted start would claim"
+	if StartLogic.home_city_id(info) != 3 or StartLogic.army_id(info) != 3:
+		return "ids"
+	if StartLogic.home_point(info) != Vector2(-500, -500):
+		return "point %s" % str(StartLogic.home_point(info))
+	if StartLogic.home_text(info) != "ada Home (-500, -500)":
+		return "home text %s" % StartLogic.home_text(info)
+	var none := StartLogic.parse({"start_granted": false, "home_city": null, "army_id": null})
+	if not StartLogic.needs_claim(none):
+		return "no start did not ask to claim"
+	if StartLogic.home_point(none) != null or StartLogic.home_city_id(none) != 0:
+		return "invented home"
+	if StartLogic.granted_text(none, "yes", "no") != "no":
+		return "granted text"
+	if StartLogic.claim_body() != null:
+		return "claim body must not carry coordinates"
+	var no_xy := StartLogic.parse({"start_granted": true, "home_city": {"id": 4, "name": "x"}})
+	if StartLogic.home_point(no_xy) != null:
+		return "missing coordinates invented"
+	return ""
+
+
+func _start_unknown_on_old_server() -> String:
+	var info := StartLogic.parse({"player_id": 1, "player_name": "Ada"})
+	if bool(info["known"]) or StartLogic.needs_claim(info):
+		return "old server treated as no-start"
+	if StartLogic.granted_text(info, "yes", "no") != "UNKNOWN":
+		return "granted not UNKNOWN"
+	if StartLogic.home_text(info) != "UNKNOWN":
+		return "home not UNKNOWN"
+	if StartLogic.home_point(StartLogic.parse(null)) != null:
+		return "null payload"
+	return ""
+
+
+func _claim_start_route() -> String:
+	var caps := Capabilities.from_openapi({"paths": {"/v1/auth/claim-start": {}}})
+	if not caps.get("claim_start", false):
+		return "claim route missed"
+	if Capabilities.from_openapi({"paths": {}}).get("claim_start", true):
+		return "missing claim route treated as present"
+	return ""
+
+
+func _label_layout_no_overlap() -> String:
+	var items := [
+		{"anchor": Vector2(100, 100), "radius": 14.0, "size": Vector2(80, 20)},
+		{"anchor": Vector2(118, 86), "radius": 11.0, "size": Vector2(80, 20)},
+		{"anchor": Vector2(104, 102), "radius": 11.0, "size": Vector2(60, 20)},
+	]
+	var rects := LabelLayout.place(items)
+	if rects.size() != 3:
+		return "count"
+	for i in rects.size():
+		for j in range(i + 1, rects.size()):
+			if (rects[i] as Rect2).intersects(rects[j]):
+				return "labels %s and %s overlap" % [i, j]
+	return ""
+
+
+func _army_marker_offset() -> String:
+	var city := Vector2(50, 50)
+	var moved := LabelLayout.offset_markers([city], [city, city], 20.0, Vector2(18, -14))
+	if (moved[0] as Vector2).distance_to(city) < 20.0:
+		return "army still on the city marker"
+	if (moved[1] as Vector2).distance_to(moved[0]) < 20.0:
+		return "two armies stacked"
+	var far := LabelLayout.offset_markers([city], [Vector2(200, 200)], 20.0, Vector2(18, -14))
+	if far[0] != Vector2(200, 200):
+		return "free army moved"
+	return ""
+
+
+func _thai_is_default() -> String:
+	if SettingsStore.new().locale != "th":
+		return "settings default"
+	var loc := Locale.new()
+	if loc.lang != "th":
+		return "locale default"
+	for key in ["start_title", "home_city", "round_col", "dmg_to_attacker", "winner_draw", "language_switch"]:
+		loc.set_lang("th")
+		var th := loc.text(key)
+		loc.set_lang("en")
+		var en := loc.text(key)
+		if th == key or en == key or th == "" or en == "":
+			return "missing text %s" % key
 	return ""
